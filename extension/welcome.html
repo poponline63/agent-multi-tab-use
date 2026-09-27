@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Welcome to Agent Multi Tab Use</title>
+		<link rel="icon" href="icons/icon32.png" />
+		<link rel="stylesheet" href="options.css" />
+		<style>
+			main {
+				max-width: 720px;
+				padding-top: 64px;
+			}
+			.hero {
+				text-align: center;
+				margin-bottom: 44px;
+			}
+			.hero img {
+				width: 88px;
+				height: 88px;
+				filter: drop-shadow(0 16px 40px #fdd66338);
+			}
+			.hero h1 {
+				margin: 18px 0 8px;
+				font-size: 38px;
+				font-weight: 700;
+				letter-spacing: -0.03em;
+			}
+			.hero p {
+				margin: 0;
+				color: var(--muted);
+				font-size: 16px;
+			}
+			.steps {
+				display: grid;
+				gap: 12px;
+				padding: 0;
+				margin: 0;
+				list-style: none;
+				counter-reset: step;
+			}
+			.step {
+				display: grid;
+				grid-template-columns: 40px 1fr auto;
+				gap: 16px;
+				align-items: center;
+				padding: 20px;
+				background: var(--surface);
+				border: 1px solid var(--line);
+				border-radius: var(--radius);
+				counter-increment: step;
+				animation: rise 420ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+			}
+			.step:nth-child(2) {
+				animation-delay: 80ms;
+			}
+			.step:nth-child(3) {
+				animation-delay: 160ms;
+			}
+			.step::before {
+				content: counter(step);
+				display: grid;
+				place-items: center;
+				width: 40px;
+				height: 40px;
+				font-family: var(--mono);
+				font-weight: 600;
+				color: var(--accent);
+				background: #fdd66314;
+				border-radius: 12px;
+			}
+			.step h2 {
+				margin: 0 0 4px;
+				font-size: 17px;
+				font-weight: 600;
+			}
+			.step p {
+				margin: 0;
+				color: var(--muted);
+				font-size: 14px;
+				line-height: 1.55;
+			}
+			.step.done::before {
+				content: "\2713";
+				color: var(--live);
+				background: #34d39914;
+			}
+			.status {
+				display: inline-flex;
+				align-items: center;
+				gap: 8px;
+				font-size: 13px;
+				color: var(--muted);
+				white-space: nowrap;
+			}
+			.status::before {
+				content: "";
+				width: 8px;
+				height: 8px;
+				border-radius: 50%;
+				background: var(--faint);
+				animation: glow 1.6s ease-in-out infinite;
+			}
+			.status.on {
+				color: var(--live);
+			}
+			.status.on::before {
+				background: var(--live);
+				box-shadow: 0 0 10px var(--live);
+			}
+			.foot {
+				margin-top: 28px;
+				text-align: center;
+				color: var(--faint);
+				font-size: 13px;
+				line-height: 1.7;
+			}
+			@media (max-width: 560px) {
+				.step {
+					grid-template-columns: 40px 1fr;
+				}
+				.step > :last-child {
+					grid-column: 2;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<div class="hero">
+				<img src="icons/icon128.png" alt="" />
+				<h1>Agent Multi Tab Use</h1>
+				<p>Let every AI agent on your PC work in your Chrome at the same time, each in its own tab group.</p>
+			</div>
+			<ol class="steps">
+				<li class="step" id="step1">
+					<div>
+						<h2>Download the companion app</h2>
+						<p>Free and small. Agents connect to it, and it passes their commands to this extension.</p>
+					</div>
+					<a class="btn primary" id="download" target="_blank" rel="noopener">Download for Windows</a>
+				</li>
+				<li class="step" id="step2">
+					<div>
+						<h2>Open AgentMultiTabUse.exe</h2>
+						<p>
+							It runs quietly in the background and starts with Windows. If Windows shows "Windows protected your PC",
+							click More info, then Run anyway.
+						</p>
+					</div>
+					<span class="status" id="status">Waiting for the app</span>
+				</li>
+				<li class="step" id="step3">
+					<div>
+						<h2>Hand your agents their setup</h2>
+						<p>Create tab groups, then copy the ready-made instructions into Claude, Codex, Hermes or any agent.</p>
+					</div>
+					<a class="btn" href="options.html">Open dashboard</a>
+				</li>
+			</ol>
+			<p class="foot">
+				Everything stays on this PC: the app only listens on 127.0.0.1 and sends nothing online.<br />
+				Chrome shows a "started debugging this browser" bar on tabs agents control. That's expected.
+			</p>
+		</main>
+		<script src="config.js"></script>
+		<script src="welcome.js"></script>
+	</body>
+</html>

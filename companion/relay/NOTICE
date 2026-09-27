@@ -1,0 +1,3 @@
+﻿Relay code in this folder (bridge.ts, protocol.ts, server.ts) is taken from
+oh-my-pi's browser relay (@oh-my-pi/pi-coding-agent, src/tools/browser/relay),
+MIT licensed; see LICENSE. Changes: two user-facing strings renamed.

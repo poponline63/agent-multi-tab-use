@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Agent Multi Tab Use</title>
+		<link rel="icon" href="icons/icon32.png" />
+		<link rel="stylesheet" href="options.css" />
+	</head>
+	<body>
+		<main>
+			<header class="top">
+				<img src="icons/icon128.png" alt="" />
+				<div class="brand">
+					<h1>Agent Multi Tab Use</h1>
+					<p>Every agent gets its own port and its own tab group in your Chrome.</p>
+				</div>
+				<div class="pulse" aria-live="polite">
+					<span id="hub" class="off"><b>Hub</b> offline</span>
+					<span class="on"><b id="live">0</b> live</span>
+					<span><b id="total">0</b> ports</span>
+					<span><b id="claimed">0</b> tabs</span>
+				</div>
+			</header>
+
+			<a class="banner" id="appBanner" href="#appCard" hidden>
+				<b>Companion app not running.</b> Agents can't connect until it runs. Install or open it &rarr;
+			</a>
+
+			<section>
+				<div class="head">
+					<h2>Tab groups</h2>
+					<p>Name a group, pick a color, then move ports into it. All its ports share one Chrome tab group.</p>
+				</div>
+				<div class="groups" id="groups"></div>
+			</section>
+
+			<section>
+				<div class="head">
+					<h2>Ports</h2>
+					<p>Click ports to select them.</p>
+				</div>
+				<div class="toolbar">
+					<button class="btn primary" id="add1" type="button">
+						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+						Add port
+					</button>
+					<button class="btn" id="add10" type="button">+10</button>
+					<span class="divider"></span>
+					<button class="btn ghost" id="selectAll" type="button">Select all</button>
+					<span class="sel"><b id="selCount">0</b> selected</span>
+					<select id="moveTo" aria-label="Move selected ports to group"></select>
+					<button class="btn" id="release" type="button" title="Free the selected ports from whichever agent holds them">Release</button>
+					<button class="btn danger" id="remove" type="button">Remove</button>
+				</div>
+				<div class="ports" id="ports"></div>
+			</section>
+
+			<section>
+				<div class="head">
+					<h2>Agent setup</h2>
+					<p>Copy and paste this into your agent so it starts on the right port.</p>
+				</div>
+				<div class="card">
+					<div class="cmd">
+						<select id="promptFor" aria-label="Which agent is this for"></select>
+						<button class="btn primary" id="copyPrompt" type="button">Copy for agent</button>
+					</div>
+					<details class="reveal">
+						<summary>Show what gets copied</summary>
+						<pre class="prompt" id="prompt"></pre>
+					</details>
+				</div>
+			</section>
+
+			<section>
+				<div class="head">
+					<h2>Companion app</h2>
+					<p>Agents connect to the free companion app, which passes their commands to this extension.</p>
+				</div>
+				<div class="card app-card" id="appCard">
+					<div class="app-row">
+						<span class="app-dot"></span>
+						<div class="app-text">
+							<b id="appTitle">Checking for the companion app…</b>
+							<span id="appSub"></span>
+						</div>
+						<a class="btn primary" id="download" target="_blank" rel="noopener">Download for Windows</a>
+					</div>
+					<label class="switch">
+						<input type="checkbox" id="shareTabs" />
+						<span class="track"></span>
+						<span class="switch-text">
+							<b>Let agents see my own tabs</b>
+							<span>Off (recommended): agents only see tabs they opened. On: they can also see and use tabs you opened, like your email. Agents never see each other's tabs either way.</span>
+						</span>
+					</label>
+					<label class="switch">
+						<input type="checkbox" id="closeTabsOnRelease" />
+						<span class="track"></span>
+						<span class="switch-text">
+							<b>Close an agent's tabs when it's done</b>
+							<span>Off (default): tabs an agent opened stay open after it finishes, so you can look at them. On: they close when the agent releases its port. Either way, an agent closes tabs whenever you ask it to, and tabs it borrowed from you are never closed.</span>
+						</span>
+					</label>
+					<p class="hint">
+						Everything stays on this PC: the app only listens on 127.0.0.1 and sends nothing online. Any program on this PC
+						can reach it, so run <code>AgentMultiTabUse.exe --quit</code> when you don't want agents in your browser. Turn
+						off any other relay extension first.
+					</p>
+				</div>
+			</section>
+		</main>
+		<div class="toast" id="toast" role="status"></div>
+		<script src="config.js"></script>
+		<script src="agent-prompt.js"></script>
+		<script src="options.js"></script>
+	</body>
+</html>
