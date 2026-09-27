@@ -1,0 +1,33 @@
+name: Bug report
+description: Something doesn't work the way the docs say
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! First, open the extension dashboard and check both versions match ("App x.y.z · Extension x.y.z"). If they differ, refresh the extension in `chrome://extensions` and try again.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: From the dashboard, or GET http://127.0.0.1:9223/status ("app" and "extension")
+      placeholder: App 1.3.10 · Extension 1.3.10 · Chrome 153
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: What's driving the browser
+      placeholder: Puppeteer 25 / Playwright (Python) / Browser Use / raw CDP / my agent (name)
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got. Include the exact error and the API request if there was one.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Smallest way to reproduce
+      render: shell

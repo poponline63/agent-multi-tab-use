@@ -1,0 +1,20 @@
+name: Feature request
+description: Something your agents need that isn't there yet
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The job your agent (or you) is trying to get done, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+  - type: input
+    id: agent
+    attributes:
+      label: Which agent / framework
+      placeholder: Claude Code, Codex, Hermes, Browser Use, Playwright, custom...

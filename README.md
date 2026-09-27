@@ -1,5 +1,10 @@
 # Agent Multi Tab Use
 
+[![Release](https://img.shields.io/github/v/release/poponline63/agent-multi-tab-use?color=fdd663&labelColor=15171c)](https://github.com/poponline63/agent-multi-tab-use/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/poponline63/agent-multi-tab-use/total?color=81c995&labelColor=15171c)](https://github.com/poponline63/agent-multi-tab-use/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-8ab4f8?labelColor=15171c)](LICENSE)
+![Works with](https://img.shields.io/badge/works%20with-Puppeteer%20·%20Playwright%20·%20Browser%20Use%20·%20CDP-ff8bcb?labelColor=15171c)
+
 Let every AI agent on your PC work in **your real Chrome** at the same time. Each agent gets its own port and its own tab group, and they never fight over tabs or steal your screen.
 
 ![Dashboard](docs/dashboard.png)
