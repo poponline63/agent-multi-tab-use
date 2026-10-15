@@ -1,5 +1,5 @@
 const MAX_PORTS = 250;
-const DEFAULTS = { ports: Array.from({ length: 10 }, (_, i) => 9224 + i), groups: [], token: "", leases: {}, shareTabs: false, closeTabsOnRelease: false };
+const DEFAULTS = { ports: Array.from({ length: 10 }, (_, i) => 9224 + i), groups: [], leases: {}, shareTabs: false, closeTabsOnRelease: false };
 const COLORS = ["blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange", "grey"];
 const $ = (id) => document.getElementById(id);
 

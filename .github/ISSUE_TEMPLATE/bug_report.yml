@@ -11,7 +11,7 @@ body:
     attributes:
       label: Versions
       description: From the dashboard, or GET http://127.0.0.1:9223/status ("app" and "extension")
-      placeholder: App 1.4.0 · Extension 1.4.0 · Chrome 153
+      placeholder: App 1.5.0 · Extension 1.5.0 · Chrome 153
     validations:
       required: true
   - type: input

@@ -95,8 +95,10 @@ class TabState {
 	sleeping = false;
 	/** Whether `chrome.debugger` is currently attached to this tab. */
 	attached = false;
-	/** Set when attach failed or the user cancelled the debugger; cleared on navigation. */
+	/** Set when Chrome refuses the tab outright or the user cancelled the debugger; cleared on navigation. */
 	banned = false;
+	/** Chrome's message from the last failed attach, passed on to the agent. */
+	attachError = "";
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
@@ -138,6 +140,10 @@ class TabState {
 const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chrome-untrusted|chrome-search):/i;
 
 const RPC_TIMEOUT_MS = 20_000;
+/** How long a command waits for the extension to (re)connect before failing; a service-worker restart takes ~1s. */
+const EXT_WAIT_MS = Number(process.env.AMTU_EXT_WAIT_MS || 10_000);
+/** Attach errors that won't go away by retrying (the page itself can't be debugged). */
+const PERMANENT_ATTACH_ERROR = /Cannot access|Cannot attach to this target/i;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
 
@@ -222,6 +228,18 @@ export class RelayBridge {
 		return this.#ext !== null && this.#extInfo !== null;
 	}
 
+	/** Waits up to `ms` for the extension; true if it is ready. */
+	async waitReady(ms = EXT_WAIT_MS): Promise<boolean> {
+		const until = Date.now() + ms;
+		while (!this.ready && Date.now() < until) await Bun.sleep(100);
+		return this.ready;
+	}
+
+	/** Downstream CDP connections currently open on this port. */
+	get connections(): number {
+		return this.#conns.size;
+	}
+
 	/** Payload for `GET /json/version`. */
 	versionInfo(wsUrl: string): Record<string, string> {
 		const ua = this.#extInfo?.userAgent ?? "";
@@ -299,11 +317,11 @@ export class RelayBridge {
 		this.#groupQueue.length = 0;
 	}
 
-	extMessage(socket: RelaySocket, raw: string): void {
+	extMessage(socket: RelaySocket, raw: string | ExtToRelayMessage): void {
 		if (socket !== this.#ext) return;
 		let msg: ExtToRelayMessage;
 		try {
-			msg = JSON.parse(raw) as ExtToRelayMessage;
+			msg = typeof raw === "string" ? (JSON.parse(raw) as ExtToRelayMessage) : raw;
 		} catch {
 			this.#log("dropping malformed extension message");
 			return;
@@ -349,6 +367,16 @@ export class RelayBridge {
 		for (const snap of msg.tabs) {
 			seen.add(snap.tabId);
 			this.#onTabUpsert(snap, { silent: true });
+			// The extension remembers which tabs this port drives; after an app
+			// restart that is the only record, so take it back (with its group).
+			if (snap.claimed) {
+				this.#laneClaims.add(snap.tabId);
+				const tab = this.#tabs.get(snap.tabId);
+				if (tab && snap.groupId >= 0) {
+					tab.grouped = true;
+					tab.ompGroupId = snap.groupId;
+				}
+			}
 		}
 		for (const tabId of [...this.#tabs.keys()]) {
 			if (!seen.has(tabId)) this.#onTabRemoved(tabId);
@@ -359,10 +387,16 @@ export class RelayBridge {
 			tab.attaching = null;
 			// A service-worker restart can drop attachments while downstream
 			// connections still hold sessions: restore them best-effort.
-			if (wasAttached && !tab.attached && this.#sessionHolders(tab.tabId).length > 0) {
+			const holders = this.#sessionHolders(tab.tabId).length;
+			if (wasAttached && !tab.attached && holders > 0) {
 				void this.#ensureAttached(tab).then(ok => {
 					if (!ok) this.#onTabDetached(tab.tabId, "reattach_failed");
 				});
+			}
+			// Attached for agents that are gone (the app restarted): drop the debugger and its infobar.
+			if (tab.attached && holders === 0) {
+				tab.attached = false;
+				void this.#rpc({ op: "detach", tabId: tab.tabId }).catch(() => {});
 			}
 		}
 		this.#syncGrouping();
@@ -472,6 +506,11 @@ export class RelayBridge {
 		if (msg.method === "OMP.claimTarget") {
 			this.#claimTab(conn, tabId);
 			this.#reply(conn, msg, {});
+			return;
+		}
+		const tab = this.#tabs.get(tabId);
+		if (tab && !(await this.#ensureAttached(tab))) {
+			this.#replyError(conn, msg, this.#attachFailure(tab));
 			return;
 		}
 		try {
@@ -650,7 +689,7 @@ export class RelayBridge {
 					return;
 				}
 				if (!(await this.#ensureAttached(tab))) {
-					this.#replyError(conn, msg, `Cannot attach to tab ${tab.tabId} (${tab.url})`);
+					this.#replyError(conn, msg, this.#attachFailure(tab));
 					return;
 				}
 				const sessionId = this.#mintSession(conn, parsed.kind, tab.tabId);
@@ -786,7 +825,8 @@ export class RelayBridge {
 		this.#log("tab detached", { tabId, reason });
 		tab.attached = false;
 		tab.attaching = null;
-		tab.banned = true;
+		// Only the user dismissing the debugging bar means hands off; anything else may attach again.
+		if (reason === "canceled_by_user") tab.banned = true;
 		// The user dismissed the debugger infobar (or the attach was torn
 		// down): release the tab's omp-group membership too.
 		this.#syncTabGrouping(tab);
@@ -994,20 +1034,18 @@ export class RelayBridge {
 
 	async #ensureAttached(tab: TabState): Promise<boolean> {
 		if (tab.attached) return true;
-		if (tab.banned || !this.#ext) return false;
+		if (tab.banned) return false;
 		if (tab.attaching) return await tab.attaching;
 		const attempt = this.#rpc({ op: "attach", tabId: tab.tabId })
 			.then(() => {
 				tab.attached = true;
+				tab.attachError = "";
 				return true;
 			})
 			.catch(err => {
-				this.#log("attach failed", {
-					tabId: tab.tabId,
-					url: tab.url,
-					error: err instanceof Error ? err.message : String(err),
-				});
-				tab.banned = true;
+				tab.attachError = err instanceof Error ? err.message : String(err);
+				this.#log("attach failed", { tabId: tab.tabId, url: tab.url, error: tab.attachError });
+				if (PERMANENT_ATTACH_ERROR.test(tab.attachError)) tab.banned = true;
 				return false;
 			})
 			.finally(() => {
@@ -1017,8 +1055,15 @@ export class RelayBridge {
 		return await attempt;
 	}
 
+	#attachFailure(tab: TabState): string {
+		const why = tab.banned && !tab.attachError ? "the user closed the debugging bar on it" : tab.attachError || "unknown error";
+		return `Cannot attach to tab ${tab.tabId} (${tab.url}): ${why}`;
+	}
+
 	#eligible(tab: TabState): boolean {
-		if (tab.banned || tab.sleeping) return false;
+		if (tab.banned) return false;
+		// A sleeping tab an agent owns is woken on attach; other sleeping tabs stay hidden.
+		if (tab.sleeping && !this.#claimed(tab.tabId)) return false;
 		if (!tab.url) return true;
 		return !INELIGIBLE_URL.test(tab.url);
 	}
@@ -1061,9 +1106,11 @@ export class RelayBridge {
 		conn.socket.send(JSON.stringify({ sessionId, method, params }));
 	}
 
-	#rpc(req: RelayRpcRequest, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {
-		const ext = this.#ext;
-		if (!ext) return Promise.reject(new Error("relay extension is not connected"));
+	async #rpc(req: RelayRpcRequest, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {
+		if (!this.#ext && !(await this.waitReady())) {
+			throw new Error("Chrome isn't connected to Agent Multi Tab Use right now (waited 10s). Check Chrome is open and the companion app is running, then retry.");
+		}
+		const ext = this.#ext!;
 		const id = ++this.#rpcSeq;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		const timer = setTimeout(() => {

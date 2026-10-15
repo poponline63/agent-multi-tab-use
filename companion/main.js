@@ -1,42 +1,70 @@
-﻿// Agent Multi Tab Use companion app. One process that:
+// Agent Multi Tab Use companion app. One process that:
 // 1. Serves the agent API on 127.0.0.1:9223 (claim ports, tab groups, /take...).
 //    Requests are forwarded to the extension, which owns the settings.
 // 2. Runs a relay on every configured port (the extension can only dial out,
-//    so something outside Chrome must listen for agents).
+//    so something outside Chrome must listen for agents). The extension reaches
+//    all of them over its one websocket to this app ({t:"lane", port, msg}).
 // 3. Flags ports another app already uses so they are never handed out.
-// 4. Shows a tray icon (tray/tray.cs, embedded in the exe).
+// 4. Shows a tray icon (tray/tray.cs, embedded in the exe) that restarts the app if it crashes.
+// 5. Logs to %LOCALAPPDATA%\Agent Multi Tab Use\hub.log.
 // Build: bun run build   ->   dist/AgentMultiTabUse.exe (no console window)
-import { existsSync, mkdirSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { isLocalOrigin, startRelayServer } from "./relay/server.ts";
+import { isLocalHost, isLocalOrigin, startRelayServer } from "./relay/server.ts";
 import trayExe from "./tray/tray.exe" with { type: "file" };
 
-const VERSION = "1.4.0";
+const VERSION = "1.5.0";
 const HUB_PORT = Number(process.env.AMTU_HUB_PORT || 9223);
 const SCAN_FROM = Number(process.env.AMTU_SCAN_FROM || 9224);
 const SCAN_COUNT = 300;
+const SCAN_CACHE_MS = 60_000;
 const RUN_RELAYS = process.env.AMTU_NO_RELAYS !== "1";
 const RPC_TIMEOUT_MS = 10000;
 const READY_TIMEOUT_MS = Number(process.env.AMTU_READY_MS || 20000);
+// A claimed port nobody has connected to for this long goes back in the pool
+// (agents often finish without releasing). Its tabs stay open for the user.
+const LEASE_IDLE_MS = Number(process.env.AMTU_LEASE_IDLE_MS || 60 * 60 * 1000);
 const IS_EXE = basename(process.execPath).toLowerCase() === "agentmultitabuse.exe";
 const HUB = `http://127.0.0.1:${HUB_PORT}`;
+const DATA_DIR = join(process.env.LOCALAPPDATA || tmpdir(), "Agent Multi Tab Use");
+const LOG_FILE = process.env.AMTU_LOG_FILE ?? (IS_EXE ? join(DATA_DIR, "hub.log") : "");
+const LOG_MAX_BYTES = 2 * 1024 * 1024;
+const STARTED = Date.now();
 
 if (process.argv.includes("--quit")) {
 	await fetch(`${HUB}/quit`, { method: "POST" }).catch(() => {});
 	process.exit(0);
 }
 
+function log(message, data) {
+	if (!LOG_FILE) return;
+	try {
+		mkdirSync(DATA_DIR, { recursive: true });
+		if (existsSync(LOG_FILE) && statSync(LOG_FILE).size > LOG_MAX_BYTES) renameSync(LOG_FILE, `${LOG_FILE}.old`);
+		appendFileSync(LOG_FILE, `${new Date().toISOString()} ${message}${data ? ` ${JSON.stringify(data)}` : ""}\n`);
+	} catch {}
+}
+process.on("uncaughtException", (err) => log("uncaught exception", { error: String(err?.stack ?? err) }));
+process.on("unhandledRejection", (err) => log("unhandled rejection", { error: String(err?.stack ?? err) }));
+
 let ext = null;
 let nextId = 1;
-let token = "";
 let extVersion = null;
+let scannedAt = 0;
+let relaySync = Promise.resolve();
 const pending = new Map();
 const relays = new Map();
+const laneSockets = new Map();
+const lastActive = new Map();
 const foreign = new Set();
 
 class NotConnected extends Error {}
+
+const NOT_CONNECTED =
+	"Chrome isn't connected right now. Retry in a few seconds. If it keeps failing: open Chrome, and check the Agent Multi Tab Use extension is enabled.";
 
 // Chrome's service worker reconnects on its own after sleeping or a Chrome
 // restart, so wait a bit before telling the agent anything is wrong.
@@ -47,10 +75,7 @@ async function waitForExt(ms = Number(process.env.AMTU_EXT_WAIT_MS || 15000)) {
 }
 
 async function askExt(op, args = {}) {
-	if (!ext && !(await waitForExt()))
-		throw new NotConnected(
-			"Chrome isn't connected right now. Retry in a few seconds. If it keeps failing: open Chrome, and check the Agent Multi Tab Use extension is enabled.",
-		);
+	if (!ext && !(await waitForExt())) throw new NotConnected(NOT_CONNECTED);
 	const id = nextId++;
 	ext.send(JSON.stringify({ id, op, args }));
 	return new Promise((resolve, reject) => {
@@ -62,7 +87,27 @@ async function askExt(op, args = {}) {
 	});
 }
 
-// "relay" = a relay (answers 426/401 on /ext), "foreign" = another app, "free" = nothing listening.
+// The bridge's view of the extension for one port: writes go out over the one
+// extension socket, tagged with the port. `text` is already JSON.
+function laneSocket(port) {
+	return { send: (text) => ext?.send(`{"t":"lane","port":${port},"msg":${text}}`), close() {} };
+}
+
+function openLane(port) {
+	const relay = relays.get(port);
+	if (!ext || !relay) return;
+	const socket = laneSocket(port);
+	laneSockets.set(port, socket);
+	relay.bridge.extConnected(socket);
+	ext.send(JSON.stringify({ t: "laneOpen", port }));
+}
+
+function closeLanes() {
+	for (const [port, socket] of laneSockets) relays.get(port)?.bridge.extClosed(socket);
+	laneSockets.clear();
+}
+
+// "relay" = one of ours (answers 426/401 on /ext), "foreign" = another app, "free" = nothing listening.
 // Raw socket on purpose: Bun's fetch() to a real Chrome's debug port (e.g. an
 // agent's private Chrome) crashes the process a few seconds later (Bun 1.3.14).
 function portKind(port) {
@@ -90,10 +135,12 @@ function pushForeign() {
 }
 
 async function scanForeign() {
+	if (Date.now() - scannedAt < SCAN_CACHE_MS) return [...foreign];
 	const ports = Array.from({ length: SCAN_COUNT }, (_, i) => SCAN_FROM + i);
 	const kinds = await Promise.all(ports.map(portKind));
 	foreign.clear();
 	ports.forEach((port, i) => kinds[i] === "foreign" && foreign.add(port));
+	scannedAt = Date.now();
 	pushForeign();
 	return [...foreign];
 }
@@ -105,29 +152,39 @@ async function ensureRelay(port) {
 		if (!foreign.has(port)) foreign.add(port), pushForeign();
 		return;
 	}
-	// "relay" here means an older standalone relay still owns the port; leave it.
 	if (kind !== "free" || relays.has(port)) return;
 	try {
-		relays.set(port, startRelayServer({ port, token: token || undefined, group: true }));
-	} catch {
+		relays.set(
+			port,
+			startRelayServer({
+				port,
+				group: true,
+				log: (message, data) => log(`[${port}] ${message}`, data),
+				onActivity: () => lastActive.set(port, Date.now()),
+			}),
+		);
+	} catch (err) {
+		log("relay failed to start", { port, error: String(err) });
 		foreign.add(port);
 		pushForeign();
+		return;
 	}
+	openLane(port);
 }
 
-async function syncRelays(ports, nextToken = "") {
-	if (nextToken !== token) {
-		token = nextToken;
-		for (const server of relays.values()) server.stop();
-		relays.clear();
-	}
-	for (const [port, server] of relays) {
-		if (!ports.includes(port)) {
+// Serialized: a stale port list arriving mid-claim must never stop a relay the
+// claim just started. Relays with agents still connected are never stopped.
+function syncRelays(ports) {
+	relaySync = relaySync.then(async () => {
+		for (const [port, server] of relays) {
+			if (ports.includes(port) || server.bridge.connections > 0) continue;
 			server.stop();
 			relays.delete(port);
+			laneSockets.delete(port);
 		}
-	}
-	await Promise.all(ports.map(ensureRelay));
+		await Promise.all(ports.map(ensureRelay));
+	}).catch((err) => log("relay sync failed", { error: String(err) }));
+	return relaySync;
 }
 
 async function waitReady(port) {
@@ -145,6 +202,26 @@ async function startPorts(ports) {
 	return Object.fromEntries(ports.map((port, i) => [port, ready[i]]));
 }
 
+// Hands leased ports back to the pool when no agent has touched them for
+// LEASE_IDLE_MS, so the port list doesn't grow forever.
+async function expireLeases() {
+	const now = Date.now();
+	const idle = (port) => {
+		const relay = relays.get(port);
+		return !relay?.bridge.connections && now - (lastActive.get(port) ?? STARTED) > LEASE_IDLE_MS;
+	};
+	const { ports } = await askExt("status");
+	const byAgent = new Map();
+	for (const p of ports) {
+		if (p.agent && idle(p.port)) byAgent.set(p.agent, [...(byAgent.get(p.agent) ?? []), p.port]);
+	}
+	for (const [agent, list] of byAgent) {
+		await askExt("release", { agent, ports: list, keepTabs: true });
+		for (const port of list) relays.get(port)?.bridge.releaseLaneClaims();
+		log("expired idle leases", { agent, ports: list });
+	}
+}
+
 // Registers the exe to start at login (HKCU, no admin). Skipped when run from source.
 function registerAutostart() {
 	if (!IS_EXE || process.argv.includes("--no-autostart")) return;
@@ -154,19 +231,20 @@ function registerAutostart() {
 	);
 }
 
-// Runs before Bun.serve on purpose: Bun.spawn children inherit open sockets on
-// Windows, and a tray holding :9223 would block the next start. The tray is
-// single-instance and exits with this process.
+// Runs before Bun.serve on purpose: children inherit open sockets on Windows,
+// and a tray holding :9223 would block the next start. The tray is
+// single-instance and exits when this process quits (restarts it if it crashes).
 async function startTray() {
 	if (!IS_EXE || process.argv.includes("--no-tray")) return;
 	const bytes = await Bun.file(trayExe).arrayBuffer();
-	const dir = join(process.env.LOCALAPPDATA || tmpdir(), "Agent Multi Tab Use");
-	const path = join(dir, `tray-${Bun.hash(bytes).toString(36)}.exe`);
+	const path = join(DATA_DIR, `tray-${Bun.hash(bytes).toString(36)}.exe`);
 	if (!existsSync(path)) {
-		mkdirSync(dir, { recursive: true });
+		mkdirSync(DATA_DIR, { recursive: true });
 		await Bun.write(path, bytes);
 	}
-	Bun.spawn([path, process.execPath, String(process.pid), HUB], { windowsHide: true, stdio: ["ignore", "ignore", "ignore"] });
+	// Detached: Bun.spawn children share a kill-on-close job with this process, and
+	// the tray must outlive a crash to restart the app.
+	spawn(path, [process.execPath, String(process.pid), HUB, LOG_FILE], { detached: true, windowsHide: true, stdio: "ignore" }).unref();
 }
 
 const HELP = {
@@ -174,8 +252,8 @@ const HELP = {
 	version: VERSION,
 	endpoints: {
 		"GET /status": "all ports, their tab group, which agent holds them, whether they are live, and ports other apps use",
-		"POST /claim": '{"agent":"hermes","group":"Hermes Tab Group","count":1} -> your own port(s) + CDP URL. Claiming again with the same agent name returns the same ports. Missing ports are created automatically (up to 250). Optional: "color", "port" for a specific one, "parent":"Hermes" to make/join a sub group titled "Hermes › <group>"',
-		"POST /release": '{"agent":"hermes","port":9224} -> give a port back when you are done ("ports":[...] for several, "all":true for every port this agent holds). Your tabs stay open unless the user turned on "closeTabsOnRelease" (see GET /status); "closeTabs":true or "keepTabs":true overrides it when the user asks. Adopted tabs always go back to the user open.',
+		"POST /claim": '{"agent":"hermes","group":"Hermes Tab Group","count":1} -> your own port(s) + CDP URL. Claiming again with the same agent name returns the same ports. Missing ports are created automatically (up to 250). Ports nobody has used for an hour go back to the pool. Optional: "color", "port" for a specific one, "parent":"Hermes" to make/join a sub group titled "Hermes › <group>"',
+		"POST /release": '{"agent":"hermes","port":9224} -> give a port back when you are done ("ports":[...] for several, "all":true for every port this agent holds; "agent" must match the holder). Your tabs stay open unless the user turned on "closeTabsOnRelease" (see GET /status); "closeTabs":true or "keepTabs":true overrides it when the user asks. Adopted tabs always go back to the user open.',
 		"POST /take": '{"agent":"hermes","from":"Claude","to":"Hermes Tab Group","count":2} -> pull idle ports out of another group. First call returns a confirmation message: ASK THE USER, then repeat with "confirm":"<token>"',
 		"POST /group": '{"name":"Hermes Tab Group","color":"yellow"} -> create or recolor a tab group ("ports":[...] to move ungrouped ports in)',
 		"POST /group/delete": '{"name":"Hermes Tab Group"} -> delete a group and its sub groups (ports stay). A sub group can be named in full ("Hermes › Research") or by its short name ("Research", add "parent" if several match)',
@@ -196,15 +274,19 @@ const ROUTES = {
 		return {
 			app: VERSION,
 			extension: extVersion,
-			...(mismatch ? { warning: `The Chrome extension (${extVersion}) and companion app (${VERSION}) versions differ. Ask the user to refresh the extension in chrome://extensions (or update whichever is older).` } : {}),
+			...(mismatch ? { warning: `The Chrome extension (${extVersion}) and companion app (${VERSION}) versions differ. Ask the user to update the older one (then click reload on the extension in chrome://extensions).` } : {}),
+			...(connected ? {} : { problem: NOT_CONNECTED }),
 			chromeConnected: connected,
 			...base,
 			usedByOtherApps: [...foreign],
+			log: LOG_FILE || null,
 		};
 	},
 	"POST /claim": async (body) => {
+		await expireLeases();
 		const result = await askExt("claim", { ...body, avoid: await scanForeign() });
 		const list = result.claimed ?? [result];
+		for (const c of list) lastActive.set(c.port, Date.now());
 		const ready = await startPorts(list.map((c) => c.port));
 		if (!result.claimed) return { ...result, ready: ready[result.port] };
 		return { ...result, claimed: list.map((c) => ({ ...c, ready: ready[c.port] })) };
@@ -238,12 +320,13 @@ const ROUTES = {
 		return result;
 	},
 	"POST /quit": async () => {
+		log("quit requested");
 		setTimeout(() => process.exit(0), 100);
 		return { quitting: true };
 	},
 };
 
-await startTray().catch(() => {});
+await startTray().catch((err) => log("tray failed to start", { error: String(err) }));
 
 try {
 	Bun.serve({
@@ -252,9 +335,11 @@ try {
 		async fetch(req, srv) {
 			const url = new URL(req.url);
 			const origin = req.headers.get("origin");
+			// Requests must be addressed to this machine by name: blocks DNS rebinding.
+			if (!isLocalHost(req.headers.get("host"), HUB_PORT)) return Response.json({ error: `Forbidden: use ${HUB}` }, { status: 403 });
 			if (url.pathname === "/ext") {
 				if (!origin?.startsWith("chrome-extension://")) return new Response("Forbidden", { status: 403 });
-				return srv.upgrade(req) ? undefined : new Response("websocket upgrade required", { status: 426 });
+				return srv.upgrade(req, { data: { origin } }) ? undefined : new Response("websocket upgrade required", { status: 426 });
 			}
 			// Web pages send their own Origin; local agents send none or this app's own address.
 			if (!isLocalOrigin(origin, HUB_PORT)) return Response.json({ error: "Forbidden: web pages can't use this API." }, { status: 403 });
@@ -271,21 +356,44 @@ try {
 		},
 		websocket: {
 			idleTimeout: 0,
+			// Screenshots travel base64-encoded through this socket.
+			maxPayloadLength: 256 * 1024 * 1024,
 			open(ws) {
+				// One browser at a time: a second Chrome profile (or another extension)
+				// can't take over while the first is connected. The same extension
+				// reconnecting (worker restart) replaces its old socket.
+				if (ext && ext.data.origin !== ws.data.origin) {
+					log("refused a second browser connection", { origin: ws.data.origin, connected: ext.data.origin });
+					ws.close(4009, "another browser is already connected");
+					return;
+				}
+				if (ext) {
+					closeLanes();
+					ext.close();
+				}
 				ext = ws;
+				log("extension connected", { origin: ws.data.origin });
 				ws.send(JSON.stringify({ t: "hello", app: "Agent Multi Tab Use", version: VERSION }));
+				scannedAt = 0;
 				scanForeign();
+				for (const port of relays.keys()) openLane(port);
 			},
 			message(ws, raw) {
+				if (ws !== ext) return;
 				let msg;
 				try {
 					msg = JSON.parse(String(raw));
 				} catch {
 					return;
 				}
+				if (msg.t === "lane") {
+					const socket = laneSockets.get(msg.port);
+					if (socket) relays.get(msg.port)?.bridge.extMessage(socket, msg.msg);
+					return;
+				}
 				if (msg.t === "ports") {
 					if (typeof msg.extVersion === "string") extVersion = msg.extVersion;
-					syncRelays(msg.ports, typeof msg.token === "string" ? msg.token : "");
+					syncRelays(msg.ports);
 					return;
 				}
 				if (msg.t) return;
@@ -296,7 +404,15 @@ try {
 				msg.ok ? call.resolve(msg.result) : call.reject(new Error(msg.error));
 			},
 			close(ws) {
-				if (ext === ws) ext = null;
+				if (ext !== ws) return;
+				ext = null;
+				closeLanes();
+				for (const call of pending.values()) {
+					clearTimeout(call.timer);
+					call.reject(new NotConnected(NOT_CONNECTED));
+				}
+				pending.clear();
+				log("extension disconnected");
 			},
 		},
 	});
@@ -306,4 +422,4 @@ try {
 }
 
 registerAutostart();
-console.log(`Agent Multi Tab Use ${VERSION} on ${HUB}`);
+log(`Agent Multi Tab Use ${VERSION} started`, { hub: HUB, pid: process.pid });

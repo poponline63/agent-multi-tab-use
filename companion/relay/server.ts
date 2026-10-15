@@ -7,9 +7,12 @@
  *   is connected, 503 before that (clients like `waitForCdp` keep polling).
  * - `GET /json` / `/json/list` → attachable page targets (debugging aid).
  * - `WS /cdp` → downstream CDP clients (puppeteer).
- * - `WS /ext` → the Chrome extension (token-gated when configured).
  *
- * Binds loopback only: anything that can reach this port can drive the
+ * The extension side arrives through the companion app's single websocket
+ * (see main.js), not through this server.
+ *
+ * Binds loopback only, and only answers requests addressed to a loopback Host
+ * (blocks DNS rebinding): anything that can reach this port can drive the
  * user's logged-in browser.
  */
 import { RelayBridge } from "./bridge";
@@ -17,11 +20,11 @@ import { RelayBridge } from "./bridge";
 /** Options for {@link startRelayServer}. */
 export interface RelayServerOptions {
 	port: number;
-	/** Shared secret the extension must present as `?token=`; unset disables the check. */
-	token?: string;
 	/** Group tabs the agent actively drives under one per-window Chrome tab group (default on); `false` disables. */
 	group?: boolean | { title: string; color: string };
 	log?: (message: string, data?: Record<string, unknown>) => void;
+	/** Called whenever an agent connects, sends a command, or disconnects. */
+	onActivity?: () => void;
 }
 
 /** A running relay server. */
@@ -32,7 +35,6 @@ export interface RelayServer {
 }
 
 interface SocketData {
-	role: "cdp" | "ext";
 	connId?: number;
 }
 
@@ -69,9 +71,19 @@ export function isLocalOrigin(origin: string | null, _port: number): boolean {
 	}
 }
 
+/**
+ * True when the request is addressed to this machine's loopback by name or IP.
+ * A web page that rebinds its own domain to 127.0.0.1 still sends its domain as
+ * Host, so this refuses it even though the socket is local.
+ */
+export function isLocalHost(host: string | null, port: number): boolean {
+	return !!host && [`127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}`].includes(host.trim().toLowerCase());
+}
+
 /** Start the relay server on 127.0.0.1. Throws if the port is taken. */
 export function startRelayServer(opts: RelayServerOptions): RelayServer {
 	const log = opts.log ?? (() => {});
+	const activity = opts.onActivity ?? (() => {});
 	const group =
 		opts.group === false ? null : opts.group === true || opts.group === undefined ? DEFAULT_GROUP : opts.group;
 	const bridge = new RelayBridge({ log, group });
@@ -81,6 +93,9 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 		hostname: "127.0.0.1",
 		port: opts.port,
 		async fetch(req, srv): Promise<Response | undefined> {
+			if (!isLocalHost(req.headers.get("host"), opts.port)) {
+				return Response.json({ error: `Forbidden: connect to 127.0.0.1:${opts.port} or localhost:${opts.port}.` }, { status: 403 });
+			}
 			const fallback = `127.0.0.1:${opts.port}`;
 			const rawHost = req.headers.get("host")?.trim();
 			const host = rawHost && isWsAuthority(rawHost) ? rawHost : fallback;
@@ -104,19 +119,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 						{ status: 403 },
 					);
 				}
-				const data: SocketData = { role: "cdp" };
-				if (srv.upgrade(req, { data })) return undefined;
-				return new Response("websocket upgrade required", { status: 426 });
-			}
-			if (path === "/ext") {
-				const origin = req.headers.get("origin");
-				if (origin && !origin.startsWith("chrome-extension://")) {
-					return new Response("Forbidden", { status: 403 });
-				}
-				if (opts.token && url.searchParams.get("token") !== opts.token) {
-					return new Response("Unauthorized", { status: 401 });
-				}
-				const data: SocketData = { role: "ext" };
+				const data: SocketData = {};
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
 			}
@@ -132,7 +135,7 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				);
 			if (path === "/json/new") {
 				if (req.method !== "PUT" && req.method !== "GET") return new Response("Method not allowed", { status: 405 });
-				if (!bridge.ready) return notReady();
+				if (!(await bridge.waitReady())) return notReady();
 				const target = url.search.length > 1 ? decodeURIComponent(url.search.slice(1)) : "about:blank";
 				try {
 					return Response.json({ ...(await bridge.createTabForHttp(target)), webSocketDebuggerUrl: `ws://${host}/cdp` });
@@ -142,7 +145,8 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			}
 			if (req.method !== "GET") return new Response("Method not allowed", { status: 405 });
 			if (path === "/json/version") {
-				if (!bridge.ready) return notReady();
+				// Ride out a reconnect (extension worker restart, app restart) instead of failing the agent.
+				if (!(await bridge.waitReady(5000))) return notReady();
 				return Response.json(bridge.versionInfo(`ws://${host}/cdp`));
 			}
 			if (path === "/json" || path === "/json/list") {
@@ -160,27 +164,18 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			idleTimeout: 0,
 			open(ws: RelayWebSocket): void {
 				sockets.add(ws);
-				if (ws.data.role === "ext") {
-					bridge.extConnected(ws);
-				} else {
-					ws.data.connId = bridge.cdpConnected(ws);
-				}
+				ws.data.connId = bridge.cdpConnected(ws);
+				activity();
 			},
 			message(ws: RelayWebSocket, message: string | Buffer): void {
 				const text = typeof message === "string" ? message : new TextDecoder().decode(message);
-				if (ws.data.role === "ext") {
-					bridge.extMessage(ws, text);
-				} else if (ws.data.connId !== undefined) {
-					bridge.cdpMessage(ws.data.connId, text);
-				}
+				if (ws.data.connId !== undefined) bridge.cdpMessage(ws.data.connId, text);
+				activity();
 			},
 			close(ws: RelayWebSocket): void {
 				sockets.delete(ws);
-				if (ws.data.role === "ext") {
-					bridge.extClosed(ws);
-				} else if (ws.data.connId !== undefined) {
-					bridge.cdpClosed(ws.data.connId);
-				}
+				if (ws.data.connId !== undefined) bridge.cdpClosed(ws.data.connId);
+				activity();
 			},
 		},
 	});

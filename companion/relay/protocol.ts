@@ -1,8 +1,8 @@
 /**
  * Wire protocol between the relay server and the Chrome extension.
  *
- * The extension dials out to `ws://127.0.0.1:<port>/ext` and exchanges JSON
- * messages. The relay drives the extension with numbered RPCs; the extension
+ * The extension reaches every port's relay over its one websocket to the
+ * companion app; each message travels wrapped as `{t:"lane", port, msg}`. The relay drives the extension with numbered RPCs; the extension
  * pushes tab lifecycle and `chrome.debugger` events as they happen.
  */
 
@@ -21,6 +21,8 @@ export interface TabSnapshot {
 	targetId?: string;
 	/** Discarded or frozen by Chrome's Memory Saver: hidden until the user wakes it. */
 	sleeping?: boolean;
+	/** In a hello: this port owns the tab (restores ownership after an app restart). */
+	claimed?: boolean;
 }
 
 /** RPCs the relay may ask the extension to perform. */

@@ -1,19 +1,45 @@
-// Self-check: runs the real hub (on test port 9299 and test ports 9724+, so it never\n// touches the live extension or relays) + the extension's hub-client.js against an in-memory
+﻿// Self-check: runs the real hub (on test port 9299 and test ports 9724+, so it never\n// touches the live extension or relays) + the extension's hub-client.js against an in-memory
 // chrome.storage, then drives the agent API. Usage: bun selftest.js (from companion/)
+// "--lease" runs only the idle-lease check, on its own hub (the main run calls it).
 import { join } from "node:path";
 
-const TEST_HUB = 9299;
+const LEASE = process.argv.includes("--lease");
+const TEST_HUB = LEASE ? 9298 : 9299;
+const SCAN_FROM = LEASE ? 9824 : 9724;
 const FOREIGN = 9729;
-const store = { ports: [9724, 9725, 9726], groups: [], leases: {} };
+const store = { ports: LEASE ? [9824] : [9724, 9725, 9726], groups: [], leases: {} };
+// A stand-in for Chrome behind the extension: tabs per port, answers attach/send/createTab.
+const fakeTabs = new Map();
+let nextTab = 100;
+function sendHello(port) {
+	const tabs = (fakeTabs.get(port) ?? []).map((tab) => ({ ...tab, claimed: true }));
+	hubSend({ t: "lane", port, msg: { t: "hello", userAgent: "selftest", browserVersion: "Chrome/selftest", tabs, attachedTabIds: [] } });
+}
+function fakeExtension(port, msg) {
+	if (msg?.t !== "rpc") return;
+	const reply = (result) => hubSend({ t: "lane", port, msg: { t: "rpcResult", id: msg.id, ok: true, result } });
+	if (msg.op === "createTab") {
+		const tab = { tabId: nextTab++, url: msg.url, title: "", active: false, windowId: 1, pinned: false, groupId: -1 };
+		fakeTabs.set(port, [...(fakeTabs.get(port) ?? []), tab]);
+		return reply({ tab });
+	}
+	if (msg.op === "send" && msg.method === "Runtime.evaluate") return reply({ result: { type: "string", value: `tab ${msg.tabId} says hi` } });
+	if (msg.op === "group") return reply({ grouped: {} });
+	reply({});
+}
 Object.assign(globalThis, {
 	COLORS: ["blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange", "grey"],
 	MAX_PORTS: 250,
 	validPort: (p) => Number.isInteger(p) && p > 0 && p <= 65535,
 	settings: store,
-	lanes: new Map(),
+	// Every port is a lane; the fake extension below answers the relays' RPCs.
+	lanes: { get: (port) => ({ port }), values: () => [] },
+	laneOpened: (port) => sendHello(port),
+	lanesClosed: () => {},
+	handleRelayMessage: (lane, msg) => fakeExtension(lane.port, msg),
 	claims: new Map(),
 	createdTabs: new Map(),
-	connect: () => {},
+
 	loadSettings: async () => ({ ports: [...store.ports], groups: structuredClone(store.groups), token: "" }),
 	chrome: {
 		runtime: { getManifest: () => ({ version: "0.0.1-test" }) },
@@ -31,9 +57,17 @@ globalThis.WebSocket = class extends RealWS {
 };
 
 // Stands in for another app (e.g. an agent's private Chrome) on a port we'd otherwise hand out.
-const other = Bun.serve({ hostname: "127.0.0.1", port: FOREIGN, fetch: () => new Response("not a relay", { status: 404 }) });
+const other = LEASE ? null : Bun.serve({ hostname: "127.0.0.1", port: FOREIGN, fetch: () => new Response("not a relay", { status: 404 }) });
 const hub = Bun.spawn(["bun", join(import.meta.dir, "main.js")], {
-	env: { ...process.env, AMTU_HUB_PORT: String(TEST_HUB), AMTU_READY_MS: "1000", AMTU_SCAN_FROM: "9724", AMTU_NO_AUTOSTART: "1", AMTU_EXT_WAIT_MS: "1500" },
+	env: {
+		...process.env,
+		AMTU_HUB_PORT: String(TEST_HUB),
+		AMTU_READY_MS: "1000",
+		AMTU_SCAN_FROM: String(SCAN_FROM),
+		AMTU_NO_AUTOSTART: "1",
+		AMTU_EXT_WAIT_MS: "1500",
+		AMTU_LEASE_IDLE_MS: LEASE ? "800" : "3600000",
+	},
 	stdout: "ignore",
 	stderr: "inherit",
 });
@@ -46,6 +80,25 @@ const assert = (cond, msg) => {
 	if (!cond) throw new Error(`FAIL: ${msg}`);
 	console.log(`ok  ${msg}`);
 };
+
+if (LEASE) {
+	try {
+		(0, eval)(await Bun.file(join(import.meta.dir, "..", "extension", "hub-client.js")).text());
+		globalThis.HUB_URL = `ws://127.0.0.1:${TEST_HUB}/ext`;
+		connectHub();
+		await Bun.sleep(800);
+		const first = await api("/claim", { agent: "forgetful" });
+		const sticky = await api("/claim", { agent: "other" });
+		assert(sticky.port !== first.port, "a fresh lease is not handed to another agent");
+		await api("/release", { agent: "other", port: sticky.port });
+		await Bun.sleep(1200);
+		const next = await api("/claim", { agent: "newcomer" });
+		assert(next.port === first.port && !store.ports.includes(first.port + 2), `a lease idle past the limit goes back to the pool (got ${next.port}, wanted ${first.port})`);
+	} finally {
+		hub.kill();
+	}
+	process.exit(0);
+}
 
 try {
 	// Before the extension connects: the "Chrome is down" path, without touching a real browser.
@@ -92,7 +145,7 @@ try {
 	const reuse = await api("/take", { agent: "hermes", from: "Claude", to: "Hermes Tab Group", count: 2, confirm: ask.confirmToken });
 	assert(reuse.error, "a confirmation token works only once");
 	const relayUp = await fetch("http://127.0.0.1:9724/json/version").then((r) => r.status, () => 0);
-	assert(relayUp === 503, "a relay listens on claimed port 9724 inside the app (503 = waiting for Chrome)");
+	assert(relayUp === 200, "a relay listens on claimed port 9724 and reaches Chrome over the one extension socket");
 	const add = await api("/ports", { add: 2 });
 	assert(add.added.join() === "9732,9733", "POST /ports adds 9732-9733");
 	const st = await api("/status");
@@ -127,10 +180,53 @@ try {
 	assert(share.shareTabs === true && store.shareTabs === true, "confirmed shareTabs:true turns sharing on");
 	const web = await fetch(`http://127.0.0.1:${TEST_HUB}/status`, { headers: { Origin: "https://evil.example" } });
 	assert(web.status === 403, "web pages are refused");
+	// ---- one socket carries every port; agents ride out an extension reconnect ----
+	const cdpPort = (await api("/claim", { agent: "cdp-test" })).port;
+	const cdp = new RealWS(`ws://127.0.0.1:${cdpPort}/cdp`);
+	await new Promise((resolve) => (cdp.onopen = resolve));
+	let cdpId = 0;
+	const cdpWaits = new Map();
+	cdp.onmessage = (e) => {
+		const m = JSON.parse(e.data);
+		if (m.id) cdpWaits.get(m.id)?.(m);
+	};
+	const send = (method, params = {}, sessionId) =>
+		new Promise((resolve) => {
+			const id = ++cdpId;
+			cdpWaits.set(id, resolve);
+			cdp.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+		});
+	const created = await send("Target.createTarget", { url: "https://example.com" });
+	const attached = await send("Target.attachToTarget", { targetId: created.result?.targetId, flatten: true });
+	const said = await send("Runtime.evaluate", { expression: "1" }, attached.result?.sessionId);
+	assert(/says hi/.test(said.result?.result?.value ?? ""), `CDP create, attach, evaluate work through the shared socket: ${JSON.stringify(said.result ?? said.error)}`);
+	globalThis.hub.ws.close();
+	const during = await send("Runtime.evaluate", { expression: "1" }, attached.result?.sessionId);
+	assert(/says hi/.test(during.result?.result?.value ?? ""), `a command sent while the extension reconnects waits and succeeds, same session: ${JSON.stringify(during.result ?? during.error)}`);
+	cdp.close();
+
+	// ---- safety ----
+	const rebound = await new Promise((resolve) => {
+		const sock = require("node:net").createConnection({ host: "127.0.0.1", port: TEST_HUB }, () => sock.write("GET /status HTTP/1.0\r\nHost: evil.example:9299\r\n\r\n"));
+		sock.once("data", (chunk) => (resolve(String(chunk).split("\r\n")[0]), sock.destroy()));
+	});
+	assert(/ 403 /.test(rebound), `a request for another Host name (DNS rebinding) is refused: ${rebound}`);
+	const intruder = new RealWS(`ws://127.0.0.1:${TEST_HUB}/ext`, { headers: { Origin: "chrome-extension://someone-else" } });
+	const intruderCode = await new Promise((resolve) => (intruder.onclose = (e) => resolve(e.code)));
+	assert(intruderCode === 4009, "a second browser/extension can't take over while one is connected");
+	assert((await api("/status")).chromeConnected === true, "and the first one stays connected");
+	const held = (await api("/claim", { agent: "holder" })).port;
+	const anon = await api("/release", { port: held });
+	assert(/held by holder; send "agent"/.test(anon.error ?? ""), "release without the holder's agent name is refused");
+	await api("/release", { port: held, agent: "holder" });
+
+	// ---- idle leases go back to the pool (separate hub with a short idle time) ----
+	const lease = Bun.spawnSync(["bun", import.meta.path, "--lease"], { stdout: "inherit", stderr: "inherit" });
+	assert(lease.exitCode === 0, "idle lease expiry check passed");
 	console.log("\nall hub checks passed");
 } finally {
 	hub.kill();
-	other.stop(true);
+	other?.stop(true);
 	process.exit(0);
 }
 

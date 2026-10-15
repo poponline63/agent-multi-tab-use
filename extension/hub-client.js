@@ -1,7 +1,7 @@
-// Link to the local hub (agent-hub.js). Agents call the hub's HTTP API; the hub
-// forwards each call here so claims, groups and ports live in the same storage
-// the extension page edits. Ops run one at a time so two agents can't grab the
-// same port.
+// Link to the companion app. Agents call the app's HTTP API; the app forwards
+// each call here so claims, groups and ports live in the same storage the
+// extension page edits. Ops run one at a time so two agents can't grab the same
+// port. The same socket carries every port's relay traffic ({t:"lane", port, msg}).
 var HUB_URL = "ws://127.0.0.1:9223/ext";
 var TAKE_CONFIRM_MS = 5 * 60 * 1000;
 var hub = { ws: null, delay: 1000 };
@@ -13,7 +13,7 @@ function hubSend(msg) {
     hub.ws.send(JSON.stringify(msg));
 }
 function pushPortsToHub() {
-  hubSend({ t: "ports", ports: settings.ports, token: settings.token, extVersion: chrome.runtime?.getManifest?.().version });
+  hubSend({ t: "ports", ports: settings.ports, extVersion: chrome.runtime?.getManifest?.().version });
 }
 async function readAll() {
   const [base, { leases }] = await Promise.all([loadSettings(), chrome.storage.local.get({ leases: {} })]);
@@ -193,8 +193,8 @@ var hubOps = {
       : (Array.isArray(ports) ? ports : [port]).map(Number);
     for (const p of list) {
       const holder = s.leases[p];
-      if (holder && agent && holder !== agent)
-        throw new Error(`port ${p} is held by ${holder}, not ${agent}`);
+      if (holder && holder !== agent)
+        throw new Error(agent ? `port ${p} is held by ${holder}, not ${agent}` : `port ${p} is held by ${holder}; send "agent":"${holder}" to release it`);
     }
     for (const p of list)
       delete s.leases[p];
@@ -319,13 +319,6 @@ function connectHub() {
     clearInterval(hub.ping ?? undefined);
     hub.ping = setInterval(() => hubSend({ t: "ping" }), 20000);
     pushPortsToHub();
-    // The app starts the relays when it gets the port list; give it a moment, then dial them.
-    setTimeout(() => {
-      for (const lane of lanes.values()) {
-        lane.delay = 1000;
-        connect(lane);
-      }
-    }, 500);
     chrome.storage.session.set({ hubOnline: true }).catch(() => {});
   };
   socket.onmessage = (event) => {
@@ -336,6 +329,10 @@ function connectHub() {
       return;
     }
     if (msg.t) {
+      if (msg.t === "lane")
+        handleRelayMessage(lanes.get(msg.port), msg.msg);
+      if (msg.t === "laneOpen")
+        laneOpened(msg.port);
       if (msg.t === "foreign")
         chrome.storage.session.set({ foreignPorts: msg.ports }).catch(() => {});
       if (msg.t === "hello")
@@ -358,6 +355,7 @@ function connectHub() {
       return;
     hub.ws = null;
     clearInterval(hub.ping ?? undefined);
+    lanesClosed();
     chrome.storage.session.set({ hubOnline: false }).catch(() => {});
     // ponytail: while the app is down this is the only connection retrying; a 5s cap
     // means Chrome links up within seconds of the app starting (one log line per retry).

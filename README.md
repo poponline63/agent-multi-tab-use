@@ -28,16 +28,25 @@ Browser automation normally means launching a separate, logged-out Chrome, or po
 agent  ──connects to──▶  companion app (127.0.0.1)  ◀──connects to──  Chrome extension ──▶ your tabs
 ```
 
-Chrome extensions can't accept incoming connections, so a small companion app listens on the ports and passes messages to the extension, which drives your tabs with `chrome.debugger`.
+Chrome extensions can't accept incoming connections, so a small companion app listens on the ports and passes messages to the extension (over one connection, whatever the number of ports), which drives your tabs with `chrome.debugger`.
 
 ## Install (Windows)
 
 1. Download `AgentMultiTabUse.exe` and `agent-multi-tab-use-extension.zip` from [Releases](https://github.com/poponline63/agent-multi-tab-use/releases/latest).
-2. Run `AgentMultiTabUse.exe`. It has no window, runs in the background, and starts with Windows. (Windows may say "Windows protected your PC". Click **More info**, then **Run anyway**. The app isn't code-signed yet.)
+2. Run `AgentMultiTabUse.exe`. It has no window: it lives in the system tray (hover for status, right-click for the status page, log, restart and quit), starts with Windows, and restarts itself if it ever crashes. (Windows may say "Windows protected your PC". Click **More info**, then **Run anyway**. The app isn't code-signed yet.)
 3. Unzip the extension, open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked**, and pick the unzipped folder.
 4. Click the extension icon. The dashboard should show **Hub online**.
 
-To stop the app: `AgentMultiTabUse.exe --quit`.
+To stop the app: **Quit** in the tray menu, or `AgentMultiTabUse.exe --quit`.
+
+## If something doesn't work
+
+- **Tray says "Waiting for Chrome"**: open Chrome and check the extension is enabled in `chrome://extensions`. It connects within a few seconds.
+- **`GET /status` shows a `warning` about versions**: update the older half, then click reload on the extension.
+- **An agent gets an error**: the message says why (Chrome's own reason for a tab it can't debug, or that Chrome isn't connected). Agents ride out short gaps on their own: commands wait up to 10 seconds while the extension or app reconnects, and agents keep their tabs across restarts.
+- **Anything else**: right-click the tray icon, **Open log** (`%LOCALAPPDATA%\Agent Multi Tab Use\hub.log`).
+
+Ports nobody has used for an hour go back to the pool, so the port list doesn't keep growing.
 
 ## Give an agent access
 
@@ -90,14 +99,15 @@ Each port also serves the standard DevTools endpoints: `GET /json/version`, `GET
 
 - Everything listens on **127.0.0.1 only**. Nothing is reachable from your network or the internet, and nothing is sent online.
 - **Web pages can't use it.** Requests carrying a website's `Origin` are refused.
-- A private key, generated automatically, stops other extensions or programs from posing as the browser.
+- Requests must be addressed to `127.0.0.1` or `localhost` by name, which blocks DNS-rebinding tricks.
+- One browser connection at a time: while your Chrome is connected, another extension or profile can't take its place.
 - Agents can't close your browser, grant site permissions, or switch your active tab.
 - **Any program on your PC can reach the ports while the app runs**, the same as Chrome's own `--remote-debugging-port`. Quit the app when you don't want agents in your browser.
 - Chrome shows a "started debugging this browser" bar on tabs agents control. That's expected.
 
 ## Build from source
 
-Requires [Bun](https://bun.sh).
+Requires [Bun](https://bun.sh) and Windows (the tray icon is compiled with the `csc.exe` that ships with Windows).
 
 ```bash
 cd companion
@@ -109,7 +119,7 @@ The extension in `extension/` loads unpacked as is.
 
 ## Credits
 
-- The per-port CDP relay in `companion/relay/` is adapted from the browser relay in [oh-my-pi](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent) by Mario Zechner and Can Bölük (MIT). See `companion/relay/LICENSE` and `NOTICE`.
+- The CDP relay in `companion/relay/` is adapted from the browser relay in [oh-my-pi](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent) by Mario Zechner and Can Bölük (MIT). See `companion/relay/LICENSE` and `NOTICE`.
 - Fonts: Bricolage Grotesque and JetBrains Mono, SIL Open Font License (see `extension/fonts/`).
 
 ## License

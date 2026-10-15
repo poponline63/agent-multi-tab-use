@@ -1,26 +1,21 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <defs>
-    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#22262e"/>
-      <stop offset="1" stop-color="#111318"/>
-    </linearGradient>
-    <linearGradient id="hub" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#e4ded2"/>
-    </linearGradient>
-  </defs>
-  <rect x="4" y="4" width="120" height="120" rx="28" fill="url(#tile)"/>
-  <rect x="5" y="5" width="118" height="118" rx="27" fill="none" stroke="#ffffff" stroke-opacity=".09" stroke-width="2"/>
-  <g fill="none" stroke-width="9" stroke-linecap="round">
-    <path d="M36 64 C 54 64, 52 35, 74 35" stroke="#8ab4f8"/>
-    <path d="M36 64 H 74" stroke="#fcad70"/>
-    <path d="M36 64 C 54 64, 52 93, 74 93" stroke="#81c995"/>
+  <rect x="3" y="3" width="122" height="122" rx="28" fill="#15171c"/>
+  <rect x="4" y="4" width="120" height="120" rx="27" fill="none" stroke="#2c313a" stroke-width="2"/>
+  <g fill="none" stroke-linecap="round" stroke-width="7">
+    <path d="M44 64 C 68 64, 66 24, 92 24" stroke="#8ab4f8"/>
+    <path d="M44 64 C 68 64, 68 44, 92 44" stroke="#f28b82"/>
+    <path d="M44 64 H 92" stroke="#fdd663"/>
+    <path d="M44 64 C 68 64, 68 84, 92 84" stroke="#81c995"/>
+    <path d="M44 64 C 68 64, 66 104, 92 104" stroke="#ff8bcb"/>
   </g>
-  <g>
-    <path d="M66 44 q5 0 5-5 V31 q0-6 6-6 H101 q6 0 6 6 V39 q0 5 5 5 Z" fill="#8ab4f8"/>
-    <path d="M66 73 q5 0 5-5 V60 q0-6 6-6 H101 q6 0 6 6 V68 q0 5 5 5 Z" fill="#fcad70"/>
-    <path d="M66 102 q5 0 5-5 V89 q0-6 6-6 H101 q6 0 6 6 V97 q0 5 5 5 Z" fill="#81c995"/>
+  <path d="M20 64 H 44" stroke="#f4efe6" stroke-width="11" stroke-linecap="round"/>
+  <circle cx="44" cy="64" r="11" fill="#f4efe6"/>
+  <circle cx="44" cy="64" r="4" fill="#15171c"/>
+  <g stroke="#15171c" stroke-width="3">
+    <circle cx="98" cy="24" r="9" fill="#8ab4f8"/>
+    <circle cx="98" cy="44" r="9" fill="#f28b82"/>
+    <circle cx="98" cy="64" r="9" fill="#fdd663"/>
+    <circle cx="98" cy="84" r="9" fill="#81c995"/>
+    <circle cx="98" cy="104" r="9" fill="#ff8bcb"/>
   </g>
-  <circle cx="34" cy="64" r="15" fill="url(#hub)"/>
-  <circle cx="34" cy="64" r="5.5" fill="#15171c"/>
 </svg>

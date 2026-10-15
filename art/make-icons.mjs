@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const big = readFileSync(join(root, "extension/icons/logo.svg"), "utf8");
 const small = readFileSync(join(root, "art/logo-small.svg"), "utf8");
-const svgFor = (size) => (size <= 32 ? small : big);
+const svgFor = (size) => (size <= 24 ? small : big);
 const CHROME = process.env.CHROME || "C:/Program Files/Google/Chrome/Application/chrome.exe";
 
 const profile = mkdtempSync(join(tmpdir(), "amtu-icons-"));
