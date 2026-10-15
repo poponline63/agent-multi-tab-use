@@ -412,36 +412,27 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 // A tab an agent's page opened (target=_blank link, window.open) is that agent's: it
 // stays in the agent's group, hidden from others, and closes with its other tabs.
-// Chrome may not report the opener but files such a tab into the opener's group a
-// moment after creating it, so a brand-new tab landing in an agent's group counts too
-// (only while new: a tab the user drags in later stays the user's).
-var SPAWN_WINDOW_MS = 5000;
-var bornAt = new Map();
-async function adoptSpawned(tab) {
-  if (tab.id === undefined || claims.has(tab.id) || Date.now() - (bornAt.get(tab.id) ?? 0) > SPAWN_WINDOW_MS)
+// webNavigation names the source tab reliably; a tab's openerTabId can point at a
+// tab id that no longer exists, and the new tab isn't always placed next to it.
+async function adoptSpawned(tabId, sourceTabId) {
+  const owner = claims.get(sourceTabId);
+  if (owner === undefined || claims.has(tabId) || !lanes.has(owner))
     return;
-  let owner = tab.openerTabId === undefined ? undefined : claims.get(tab.openerTabId);
-  // Several agents can share one group title, so the group alone doesn't say whose
-  // tab it is: Chrome puts a tab opened from a page right after its opener.
-  if (owner === undefined && tab.groupId >= 0 && tab.index > 0) {
-    const [left] = await chrome.tabs.query({ windowId: tab.windowId, index: tab.index - 1 }).catch(() => []);
-    if (left?.groupId === tab.groupId)
-      owner = claims.get(left.id);
-  }
-  if (owner === undefined || !lanes.has(owner))
-    return;
-  claim(lanes.get(owner), tab.id);
-  createdTabs.set(tab.id, owner);
+  claim(lanes.get(owner), tabId);
+  createdTabs.set(tabId, owner);
   saveTabState();
+  const snap = await chrome.tabs.get(tabId).then(snapshot, () => null).then(withTargetId);
+  if (snap)
+    postTab("tabUpdated", snap);
 }
 function postTab(t, snap) {
   postVisible(snap.tabId, { t, tab: claims.has(snap.tabId) ? { ...snap, claimed: true } : snap });
 }
+chrome.webNavigation.onCreatedNavigationTarget.addListener(({ sourceTabId, tabId }) => void adoptSpawned(tabId, sourceTabId));
 chrome.tabs.onCreated.addListener(async (tab) => {
   await Promise.allSettled([...inflightCreates]);
-  if (tab.id !== undefined)
-    bornAt.set(tab.id, Date.now());
-  await adoptSpawned(tab);
+  if (tab.id !== undefined && tab.openerTabId !== undefined)
+    await adoptSpawned(tab.id, tab.openerTabId);
   const snap = await withTargetId(snapshot(tab));
   if (snap)
     postTab("tabCreated", snap);
@@ -452,9 +443,7 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
     saveTabState();
   }
 });
-chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
-  if (changeInfo.groupId !== undefined)
-    await adoptSpawned(tab);
+chrome.tabs.onUpdated.addListener(async (_tabId, _changeInfo, tab) => {
   const snap = await withTargetId(snapshot(tab));
   if (snap)
     postTab("tabUpdated", snap);
@@ -465,7 +454,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   targetIds.delete(tabId);
   createdTabs.delete(tabId);
   seenTabs.delete(tabId);
-  bornAt.delete(tabId);
   if (claims.delete(tabId))
     refreshStatus();
   saveTabState();
