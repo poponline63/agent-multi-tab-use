@@ -359,10 +359,10 @@ function connectHub() {
     hub.ws = null;
     clearInterval(hub.ping ?? undefined);
     chrome.storage.session.set({ hubOnline: false }).catch(() => {});
-    // ponytail: while the app is down this is the only connection retrying, so
-    // back off to 30s (one log line per retry). The 30s keepalive alarm also calls it.
+    // ponytail: while the app is down this is the only connection retrying; a 5s cap
+    // means Chrome links up within seconds of the app starting (one log line per retry).
     const delay = hub.delay;
-    hub.delay = Math.min(hub.delay * 2, 30000);
+    hub.delay = Math.min(hub.delay * 2, 5000);
     setTimeout(connectHub, delay);
   };
   socket.onerror = () => socket.close();

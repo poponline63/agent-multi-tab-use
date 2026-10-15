@@ -1,11 +1,11 @@
 ﻿{
 	"name": "agent-multi-tab-use-companion",
-	"version": "1.3.10",
+	"version": "1.4.0",
 	"private": true,
 	"license": "MIT",
 	"scripts": {
 		"start": "bun main.js",
 		"test": "bun selftest.js",
-		"build": "bun build main.js --compile --windows-hide-console --windows-icon=icon.ico --windows-title=\"Agent Multi Tab Use\" --windows-description=\"Companion app for the Agent Multi Tab Use Chrome extension\" --windows-version=1.3.10.0 --outfile=dist/AgentMultiTabUse.exe"
+		"build": "bun build.js"
 	}
 }

@@ -1,7 +1,7 @@
 ﻿{
 	"manifest_version": 3,
 	"name": "Agent Multi Tab Use",
-	"version": "1.3.10",
+	"version": "1.4.0",
 	"description": "Let many AI agents drive your Chrome at once: one port per agent, named tab groups, no tab fights.",
 	"permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
 	"background": {

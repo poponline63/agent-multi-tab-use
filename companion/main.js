@@ -4,12 +4,16 @@
 // 2. Runs a relay on every configured port (the extension can only dial out,
 //    so something outside Chrome must listen for agents).
 // 3. Flags ports another app already uses so they are never handed out.
+// 4. Shows a tray icon (tray/tray.cs, embedded in the exe).
 // Build: bun run build   ->   dist/AgentMultiTabUse.exe (no console window)
+import { existsSync, mkdirSync } from "node:fs";
 import { createConnection } from "node:net";
-import { basename } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import { isLocalOrigin, startRelayServer } from "./relay/server.ts";
+import trayExe from "./tray/tray.exe" with { type: "file" };
 
-const VERSION = "1.3.10";
+const VERSION = "1.4.0";
 const HUB_PORT = Number(process.env.AMTU_HUB_PORT || 9223);
 const SCAN_FROM = Number(process.env.AMTU_SCAN_FROM || 9224);
 const SCAN_COUNT = 300;
@@ -150,6 +154,21 @@ function registerAutostart() {
 	);
 }
 
+// Runs before Bun.serve on purpose: Bun.spawn children inherit open sockets on
+// Windows, and a tray holding :9223 would block the next start. The tray is
+// single-instance and exits with this process.
+async function startTray() {
+	if (!IS_EXE || process.argv.includes("--no-tray")) return;
+	const bytes = await Bun.file(trayExe).arrayBuffer();
+	const dir = join(process.env.LOCALAPPDATA || tmpdir(), "Agent Multi Tab Use");
+	const path = join(dir, `tray-${Bun.hash(bytes).toString(36)}.exe`);
+	if (!existsSync(path)) {
+		mkdirSync(dir, { recursive: true });
+		await Bun.write(path, bytes);
+	}
+	Bun.spawn([path, process.execPath, String(process.pid), HUB], { windowsHide: true, stdio: ["ignore", "ignore", "ignore"] });
+}
+
 const HELP = {
 	name: "Agent Multi Tab Use",
 	version: VERSION,
@@ -223,6 +242,8 @@ const ROUTES = {
 		return { quitting: true };
 	},
 };
+
+await startTray().catch(() => {});
 
 try {
 	Bun.serve({

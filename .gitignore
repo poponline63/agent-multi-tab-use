@@ -1,3 +1,4 @@
 companion/dist/
 node_modules/
 *.log
+companion/tray/tray.exe
