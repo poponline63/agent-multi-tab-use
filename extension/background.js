@@ -410,19 +410,41 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   postToOwners(source.tabId, { t: "detached", tabId: source.tabId, reason });
   owners.delete(source.tabId);
 });
+// A tab an agent's page opened (target=_blank link, window.open) is that agent's: it
+// stays in the agent's group, hidden from others, and closes with its other tabs.
+// Chrome may not report the opener but files such a tab into the opener's group a
+// moment after creating it, so a brand-new tab landing in an agent's group counts too
+// (only while new: a tab the user drags in later stays the user's).
+var SPAWN_WINDOW_MS = 5000;
+var bornAt = new Map();
+async function adoptSpawned(tab) {
+  if (tab.id === undefined || claims.has(tab.id) || Date.now() - (bornAt.get(tab.id) ?? 0) > SPAWN_WINDOW_MS)
+    return;
+  let owner = tab.openerTabId === undefined ? undefined : claims.get(tab.openerTabId);
+  // Several agents can share one group title, so the group alone doesn't say whose
+  // tab it is: Chrome puts a tab opened from a page right after its opener.
+  if (owner === undefined && tab.groupId >= 0 && tab.index > 0) {
+    const [left] = await chrome.tabs.query({ windowId: tab.windowId, index: tab.index - 1 }).catch(() => []);
+    if (left?.groupId === tab.groupId)
+      owner = claims.get(left.id);
+  }
+  if (owner === undefined || !lanes.has(owner))
+    return;
+  claim(lanes.get(owner), tab.id);
+  createdTabs.set(tab.id, owner);
+  saveTabState();
+}
+function postTab(t, snap) {
+  postVisible(snap.tabId, { t, tab: claims.has(snap.tabId) ? { ...snap, claimed: true } : snap });
+}
 chrome.tabs.onCreated.addListener(async (tab) => {
   await Promise.allSettled([...inflightCreates]);
-  // A tab an agent's page opened (target=_blank link, window.open) is that agent's: it
-  // joins the agent's group and closes with its other tabs.
-  const opener = tab.openerTabId === undefined ? undefined : claims.get(tab.openerTabId);
-  if (opener !== undefined && tab.id !== undefined && !claims.has(tab.id) && lanes.has(opener)) {
-    claim(lanes.get(opener), tab.id);
-    createdTabs.set(tab.id, opener);
-    saveTabState();
-  }
+  if (tab.id !== undefined)
+    bornAt.set(tab.id, Date.now());
+  await adoptSpawned(tab);
   const snap = await withTargetId(snapshot(tab));
   if (snap)
-    postVisible(snap.tabId, { t: "tabCreated", tab: claims.has(snap.tabId) ? { ...snap, claimed: true } : snap });
+    postTab("tabCreated", snap);
 });
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   if (createdTabs.has(tabId) && !seenTabs.has(tabId)) {
@@ -430,10 +452,12 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
     saveTabState();
   }
 });
-chrome.tabs.onUpdated.addListener(async (_tabId, _changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener(async (_tabId, changeInfo, tab) => {
+  if (changeInfo.groupId !== undefined)
+    await adoptSpawned(tab);
   const snap = await withTargetId(snapshot(tab));
   if (snap)
-    postVisible(snap.tabId, { t: "tabUpdated", tab: snap });
+    postTab("tabUpdated", snap);
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   broadcast({ t: "tabRemoved", tabId });
@@ -441,6 +465,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   targetIds.delete(tabId);
   createdTabs.delete(tabId);
   seenTabs.delete(tabId);
+  bornAt.delete(tabId);
   if (claims.delete(tabId))
     refreshStatus();
   saveTabState();

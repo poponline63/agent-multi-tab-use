@@ -16,7 +16,7 @@ import { basename, join } from "node:path";
 import { isLocalHost, isLocalOrigin, startRelayServer } from "./relay/server.ts";
 import trayExe from "./tray/tray.exe" with { type: "file" };
 
-const VERSION = "1.6.0";
+const VERSION = "1.6.3";
 const HUB_PORT = Number(process.env.AMTU_HUB_PORT || 9223);
 const SCAN_FROM = Number(process.env.AMTU_SCAN_FROM || 9224);
 const SCAN_COUNT = 300;
@@ -56,6 +56,7 @@ let nextId = 1;
 let extVersion = null;
 let scannedAt = 0;
 let relaySync = Promise.resolve();
+let reloadAsked = false;
 const pending = new Map();
 const relays = new Map();
 const laneSockets = new Map();
@@ -221,6 +222,21 @@ async function expireLeases() {
 		for (const port of list) relays.get(port)?.bridge.releaseLaneClaims();
 		log("expired idle leases", { agent, ports: list });
 	}
+}
+
+// An unpacked extension keeps running its old code after its files are updated.
+// Ask it to reload, once per app run (if the files on disk are still old it comes
+// back unchanged and the /status warning remains), and only while no agent is
+// connected: a reload forgets which tabs belong to which agent.
+function maybeReloadExtension() {
+	if (!ext || reloadAsked || !extVersion || extVersion === VERSION) return;
+	if ([...relays.values()].some((relay) => relay.bridge.connections > 0)) {
+		setTimeout(maybeReloadExtension, 30_000);
+		return;
+	}
+	reloadAsked = true;
+	log("asking the extension to reload", { extension: extVersion, app: VERSION });
+	ext.send(JSON.stringify({ t: "reload" }));
 }
 
 // Registers the exe to start at login (HKCU, no admin). Skipped when run from source.
@@ -390,6 +406,7 @@ try {
 				}
 				if (msg.t === "ports") {
 					if (typeof msg.extVersion === "string") extVersion = msg.extVersion;
+					maybeReloadExtension();
 					syncRelays(msg.ports);
 					return;
 				}

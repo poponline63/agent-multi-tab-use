@@ -101,6 +101,7 @@ var hubOps = {
   // gets the same ports), the lowest free port, then a new port. count > 1 claims several.
   async claim({ agent = "agent", group, parent, color, port, count = 1, avoid = [] } = {}) {
     const s = await readAll();
+    trimPool(s);
     agent = String(agent).slice(0, 60);
     const n = Math.max(1, Math.min(Math.floor(Number(count)) || 1, MAX_PORTS));
     const title = group || parent ? groupTitle(s, group || parent, group ? parent : null, color) : null;
@@ -260,6 +261,9 @@ function connectHub() {
         chrome.storage.session.set({ foreignPorts: msg.ports }).catch(() => {});
       if (msg.t === "hello")
         chrome.storage.session.set({ appVersion: msg.version }).catch(() => {});
+      // The app was updated along with the extension's files: load the new files.
+      if (msg.t === "reload")
+        chrome.runtime.reload();
       return;
     }
     const op = hubOps[msg.op];

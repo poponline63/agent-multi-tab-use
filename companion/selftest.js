@@ -43,7 +43,7 @@ Object.assign(globalThis, {
 	seenTabs: new Set(),
 	loadSettings: async () => ({ ports: [...store.ports], leases: structuredClone(store.leases), groupColors: structuredClone(store.groupColors), shareTabs: store.shareTabs === true }),
 	chrome: {
-		runtime: { getManifest: () => ({ version: "0.0.1-test" }) },
+		runtime: { getManifest: () => ({ version: "0.0.1-test" }), reload: () => {} },
 		tabs: { remove: async (id) => void removedTabs.push(id) },
 		storage: {
 			local: { get: async (d) => ({ ...d, ...Object.fromEntries(Object.keys(d).filter((k) => k in store).map((k) => [k, structuredClone(store[k])])) }), set: async (p) => Object.assign(store, structuredClone(p)) },
