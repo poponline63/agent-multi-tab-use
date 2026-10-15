@@ -2,18 +2,13 @@
 // exactly what to call, what comes back, and what to do when something fails.
 const HUB = "http://127.0.0.1:9223";
 
-function buildAgentPrompt({ claimBody, groupName, fallbackPort, shareTabs }) {
+function buildAgentPrompt({ claimBody, groupName, shareTabs }) {
 	const body = JSON.stringify(claimBody);
 	const pyBody = body.replace(/"/g, '\\"');
-	const groupLine = groupName
-		? `Tabs you open are put in the "${groupName}" tab group automatically, so the user can see what you're doing.`
-		: `Add "group":"<name>" to the claim to get your own named tab group (created if missing), e.g. "Hermes Tab Group".`;
+	const groupLine = `Tabs you open (and popups your pages open) go in the "${groupName ?? "<group>"}" tab group automatically, so the user can see what you're doing.`;
 	const seeLine = shareTabs
 		? "You can see tabs you opened plus the user's own tabs. Only touch the user's tabs when they ask you to."
 		: "You can only see tabs you opened. The user's own tabs are private and invisible to you. Always open a new tab for your work.";
-	const fallback = fallbackPort
-		? `\n   If the app itself is down, you can still connect straight to http://127.0.0.1:${fallbackPort}.`
-		: "";
 	return `You can control the user's real Chrome browser (their own profile, logged in) through Agent Multi Tab Use.
 Every agent gets its own port ("lane") and its own tab group. Everything runs locally on this PC.
 
@@ -25,10 +20,11 @@ STEP 1: CLAIM YOUR PORT
   Reply:      {"port": 9236, "cdpUrl": "http://127.0.0.1:9236", "group": "...", "ready": true}
   - Replace "your-name" with a short fixed name for yourself (e.g. "hermes", "codex-research"). Claiming again
     with the same name returns the same port, so retries are safe.
+  - "group" is the name of your Chrome tab group; agents that claim the same group share it.
   - Need several ports (one per sub-agent)? Add "count": 5. Missing ports are created automatically.
   - 503 with "retry": true means Chrome is reconnecting. Wait 5 seconds and retry, for up to a minute.
   - "ready": false means Chrome hasn't attached to that port yet. Wait a few seconds; GET ${HUB}/status shows
-    "live": true per port when it's usable.${fallback}
+    "live": true per port when it's usable.
 
 STEP 2: CONNECT TO YOUR cdpUrl (any Chrome DevTools Protocol client works)
   Node, Puppeteer:    const browser = await puppeteer.connect({ browserURL: cdpUrl, defaultViewport: null });
@@ -43,16 +39,12 @@ STEP 2: CONNECT TO YOUR cdpUrl (any Chrome DevTools Protocol client works)
   Origin header: send none, or a localhost one (http://127.0.0.1). A web-site Origin is refused with 403.
   PUT /json/new replies with the tab's "groupId" once it has joined your tab group.
 
-STEP 3: WHEN YOU'RE DONE
-  Close the tabs you opened, then disconnect (Puppeteer: browser.disconnect(); Playwright: leave the
-  "with sync_playwright()" block). browser.close() is harmless (the user's Chrome ignores it) but disconnecting
-  is the clean way.
-  Release your ports: POST ${HUB}/release  {"agent":"your-name","all":true}
-  Your tabs: by default they stay open after you release. GET /status "closeTabsOnRelease" shows the user's
-  preference (if true, release closes the tabs you opened). Follow the user: if they ask you to close your
-  tabs, add "closeTabs": true to the release (or close them yourself with Target.closeTarget); if they want
-  them kept, add "keepTabs": true. Tabs you adopted from the user are always handed back open.
-  POST ${HUB}/settings {"closeTabsOnRelease": true|false} changes the default when the user asks.
+STEP 3: WHEN YOU'RE DONE (always, even after a quick lookup)
+  Disconnect (Puppeteer: browser.disconnect(); Playwright: leave the "with sync_playwright()" block), then
+  release your ports: POST ${HUB}/release  {"agent":"your-name","all":true}
+  Release tidies up for you: tabs you opened close, except ones the user has looked at, which stay open for
+  them. If the user wants your tabs kept, add "keepTabs": true; to close even ones they looked at, "closeTabs": true.
+  Forgot to release? After 30 minutes without use your port is released the same way.
 
 WHAT YOU CAN SEE
   ${seeLine}
@@ -64,7 +56,7 @@ WHAT YOU CAN SEE
 
 OTHER ENDPOINTS (GET ${HUB}/ lists them all)
   GET  /status   every port: its group, which agent holds it, "live", tab count; plus "chromeConnected"
-  POST /group    {"name":"...","color":"yellow"}  create or recolor a tab group
+  POST /group    {"name":"...","color":"yellow"}  set a tab group's color
   SUB GROUPS     To keep a separate piece of work apart, claim into a sub group of your group:
                  POST /claim {"agent":"your-name","group":"Research","parent":"<your group>"}
                  It becomes its own Chrome tab group titled "<your group> › Research" in your color.
@@ -78,13 +70,10 @@ OTHER ENDPOINTS (GET ${HUB}/ lists them all)
                  {"shareTabs": true}   let agents see the user's own tabs. Only when the user asks you to. The first
                  reply is a confirmation message: show it to the user, and repeat with "confirm":"<token>" only after
                  they say yes. GET /status shows the current "shareTabs".
-  POST /take     {"agent":"...","from":"<other group>","to":"<your group>","count":2}  pull idle ports from another
-                 group. The first reply is a confirmation message: show it to the user word for word and wait for
-                 their yes, then repeat the request with "confirm":"<token>". Never confirm on your own.
 
 RULES
 1. Only use the port(s) you claimed. Other ports belong to other agents.
-2. Never close tabs you didn't open.
+2. Never close tabs you didn't open. Reuse your tab instead of opening a new one for every lookup.
 3. This is the user's real, logged-in browser. Ask before purchases, sending messages or posts, or changing
    account settings.
 4. If something still fails after retrying, stop and report the exact error. Don't launch a separate browser instead.

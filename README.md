@@ -46,7 +46,7 @@ To stop the app: **Quit** in the tray menu, or `AgentMultiTabUse.exe --quit`.
 - **An agent gets an error**: the message says why (Chrome's own reason for a tab it can't debug, or that Chrome isn't connected). Agents ride out short gaps on their own: commands wait up to 10 seconds while the extension or app reconnects, and agents keep their tabs across restarts.
 - **Anything else**: right-click the tray icon, **Open log** (`%LOCALAPPDATA%\Agent Multi Tab Use\hub.log`).
 
-Ports nobody has used for an hour go back to the pool, so the port list doesn't keep growing.
+Ports are one shared pool: a released port goes to the next agent, and spare ones are removed again, so the list doesn't keep growing. An agent that forgets to release is released after 30 idle minutes, and its leftover tabs are tidied the same way (tabs you've looked at stay open). Popups and links an agent's page opens join that agent's tab group.
 
 ## Give an agent access
 
@@ -84,14 +84,13 @@ curl -s -X POST http://127.0.0.1:9223/release -H "Content-Type: application/json
 | Endpoint | What it does |
 |---|---|
 | `GET /status` | Every port, its group, who holds it, live or not, plus settings and version info |
-| `POST /claim` | Get your own port(s). `count` for several, `parent` for a sub group |
-| `POST /release` | Give ports back. `all`, `closeTabs`, `keepTabs` |
-| `POST /group` | Create or recolor a tab group |
-| `POST /group/delete` | Delete a group and its sub groups |
+| `POST /claim` | Get your own port. `group` names your Chrome tab group (default "Agents"); `count` for several, `parent` for a sub group |
+| `POST /release` | Give ports back (`all` for every port you hold). Tabs you opened close unless the user looked at them; `keepTabs` / `closeTabs` override |
+| `POST /group` | Set a tab group's color |
+| `POST /group/delete` | Forget a group's color |
 | `POST /ports` | Add ports (up to 250) |
 | `POST /adopt` | Take over a tab the user opened (only while sharing is on) |
-| `POST /take` | Pull idle ports from another group. **User must confirm** |
-| `POST /settings` | `shareTabs` (turning it on needs **user confirmation**), `closeTabsOnRelease` |
+| `POST /settings` | `shareTabs` (turning it on needs **user confirmation**) |
 
 Each port also serves the standard DevTools endpoints: `GET /json/version`, `GET /json/list`, `PUT /json/new?<url>`, and `WS /cdp`.
 

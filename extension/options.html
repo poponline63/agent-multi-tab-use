@@ -18,7 +18,7 @@
 				<div class="pulse" aria-live="polite">
 					<span id="hub" class="off"><b>Hub</b> offline</span>
 					<span class="on"><b id="live">0</b> live</span>
-					<span><b id="total">0</b> ports</span>
+					<span><b id="total">0</b> agents</span>
 					<span><b id="claimed">0</b> tabs</span>
 				</div>
 			</header>
@@ -29,33 +29,11 @@
 
 			<section>
 				<div class="head">
-					<h2>Tab groups</h2>
-					<p>Name a group, pick a color, then move ports into it. All its ports share one Chrome tab group.</p>
+					<h2>Active agents</h2>
+					<p>Each agent gets its own port and tab group. Agents idle for 30 minutes are released automatically.</p>
 				</div>
-				<div class="groups" id="groups"></div>
+				<div class="agents" id="agents"></div>
 			</section>
-
-			<section>
-				<div class="head">
-					<h2>Ports</h2>
-					<p>Click ports to select them.</p>
-				</div>
-				<div class="toolbar">
-					<button class="btn primary" id="add1" type="button">
-						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
-						Add port
-					</button>
-					<button class="btn" id="add10" type="button">+10</button>
-					<span class="divider"></span>
-					<button class="btn ghost" id="selectAll" type="button">Select all</button>
-					<span class="sel"><b id="selCount">0</b> selected</span>
-					<select id="moveTo" aria-label="Move selected ports to group"></select>
-					<button class="btn" id="release" type="button" title="Free the selected ports from whichever agent holds them">Release</button>
-					<button class="btn danger" id="remove" type="button">Remove</button>
-				</div>
-				<div class="ports" id="ports"></div>
-			</section>
-
 			<section>
 				<div class="head">
 					<h2>Agent setup</h2>
@@ -63,7 +41,7 @@
 				</div>
 				<div class="card">
 					<div class="cmd">
-						<select id="promptFor" aria-label="Which agent is this for"></select>
+						<input id="promptGroup" class="group-input" value="Agents" spellcheck="false" aria-label="Tab group name for this agent" />
 						<button class="btn primary" id="copyPrompt" type="button">Copy for agent</button>
 					</div>
 					<details class="reveal">
@@ -95,14 +73,10 @@
 							<span>Off (recommended): agents only see tabs they opened. On: they can also see and use tabs you opened, like your email. Agents never see each other's tabs either way.</span>
 						</span>
 					</label>
-					<label class="switch">
-						<input type="checkbox" id="closeTabsOnRelease" />
-						<span class="track"></span>
-						<span class="switch-text">
-							<b>Close an agent's tabs when it's done</b>
-							<span>Off (default): tabs an agent opened stay open after it finishes, so you can look at them. On: they close when the agent releases its port. Either way, an agent closes tabs whenever you ask it to, and tabs it borrowed from you are never closed.</span>
-						</span>
-					</label>
+					<p class="hint">
+						When an agent is done, or idle for 30 minutes, the tabs it opened close, except ones you've looked at, which
+						stay open for you.
+					</p>
 					<p class="hint">
 						Everything stays on this PC: the app only listens on 127.0.0.1 and sends nothing online. Any program on this PC
 						can reach it, so run <code>AgentMultiTabUse.exe --quit</code> when you don't want agents in your browser. Turn

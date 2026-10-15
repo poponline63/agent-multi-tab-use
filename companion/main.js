@@ -1,5 +1,5 @@
 // Agent Multi Tab Use companion app. One process that:
-// 1. Serves the agent API on 127.0.0.1:9223 (claim ports, tab groups, /take...).
+// 1. Serves the agent API on 127.0.0.1:9223 (claim/release ports, tab groups, status).
 //    Requests are forwarded to the extension, which owns the settings.
 // 2. Runs a relay on every configured port (the extension can only dial out,
 //    so something outside Chrome must listen for agents). The extension reaches
@@ -16,7 +16,7 @@ import { basename, join } from "node:path";
 import { isLocalHost, isLocalOrigin, startRelayServer } from "./relay/server.ts";
 import trayExe from "./tray/tray.exe" with { type: "file" };
 
-const VERSION = "1.5.0";
+const VERSION = "1.6.0";
 const HUB_PORT = Number(process.env.AMTU_HUB_PORT || 9223);
 const SCAN_FROM = Number(process.env.AMTU_SCAN_FROM || 9224);
 const SCAN_COUNT = 300;
@@ -24,9 +24,10 @@ const SCAN_CACHE_MS = 60_000;
 const RUN_RELAYS = process.env.AMTU_NO_RELAYS !== "1";
 const RPC_TIMEOUT_MS = 10000;
 const READY_TIMEOUT_MS = Number(process.env.AMTU_READY_MS || 20000);
-// A claimed port nobody has connected to for this long goes back in the pool
-// (agents often finish without releasing). Its tabs stay open for the user.
-const LEASE_IDLE_MS = Number(process.env.AMTU_LEASE_IDLE_MS || 60 * 60 * 1000);
+// A claimed port nobody has used for this long is released for its agent (agents
+// often finish without releasing): tidied like a normal release, back in the pool.
+const LEASE_IDLE_MS = Number(process.env.AMTU_LEASE_IDLE_MS || 30 * 60 * 1000);
+const EXPIRY_CHECK_MS = 5 * 60 * 1000;
 const IS_EXE = basename(process.execPath).toLowerCase() === "agentmultitabuse.exe";
 const HUB = `http://127.0.0.1:${HUB_PORT}`;
 const DATA_DIR = join(process.env.LOCALAPPDATA || tmpdir(), "Agent Multi Tab Use");
@@ -202,21 +203,21 @@ async function startPorts(ports) {
 	return Object.fromEntries(ports.map((port, i) => [port, ready[i]]));
 }
 
-// Hands leased ports back to the pool when no agent has touched them for
-// LEASE_IDLE_MS, so the port list doesn't grow forever.
+function idleMs(port) {
+	return relays.get(port)?.bridge.connections ? 0 : Date.now() - (lastActive.get(port) ?? STARTED);
+}
+
+// Releases ports no agent has touched for LEASE_IDLE_MS, closing the tabs they
+// left behind (unless the user looked at them), so dead agents don't pile up.
 async function expireLeases() {
-	const now = Date.now();
-	const idle = (port) => {
-		const relay = relays.get(port);
-		return !relay?.bridge.connections && now - (lastActive.get(port) ?? STARTED) > LEASE_IDLE_MS;
-	};
+	const idle = (port) => idleMs(port) > LEASE_IDLE_MS;
 	const { ports } = await askExt("status");
 	const byAgent = new Map();
 	for (const p of ports) {
 		if (p.agent && idle(p.port)) byAgent.set(p.agent, [...(byAgent.get(p.agent) ?? []), p.port]);
 	}
 	for (const [agent, list] of byAgent) {
-		await askExt("release", { agent, ports: list, keepTabs: true });
+		await askExt("release", { agent, ports: list });
 		for (const port of list) relays.get(port)?.bridge.releaseLaneClaims();
 		log("expired idle leases", { agent, ports: list });
 	}
@@ -252,13 +253,12 @@ const HELP = {
 	version: VERSION,
 	endpoints: {
 		"GET /status": "all ports, their tab group, which agent holds them, whether they are live, and ports other apps use",
-		"POST /claim": '{"agent":"hermes","group":"Hermes Tab Group","count":1} -> your own port(s) + CDP URL. Claiming again with the same agent name returns the same ports. Missing ports are created automatically (up to 250). Ports nobody has used for an hour go back to the pool. Optional: "color", "port" for a specific one, "parent":"Hermes" to make/join a sub group titled "Hermes › <group>"',
-		"POST /release": '{"agent":"hermes","port":9224} -> give a port back when you are done ("ports":[...] for several, "all":true for every port this agent holds; "agent" must match the holder). Your tabs stay open unless the user turned on "closeTabsOnRelease" (see GET /status); "closeTabs":true or "keepTabs":true overrides it when the user asks. Adopted tabs always go back to the user open.',
-		"POST /take": '{"agent":"hermes","from":"Claude","to":"Hermes Tab Group","count":2} -> pull idle ports out of another group. First call returns a confirmation message: ASK THE USER, then repeat with "confirm":"<token>"',
-		"POST /group": '{"name":"Hermes Tab Group","color":"yellow"} -> create or recolor a tab group ("ports":[...] to move ungrouped ports in)',
-		"POST /group/delete": '{"name":"Hermes Tab Group"} -> delete a group and its sub groups (ports stay). A sub group can be named in full ("Hermes › Research") or by its short name ("Research", add "parent" if several match)',
+		"POST /claim": '{"agent":"hermes","group":"Hermes"} -> your own port + CDP URL. "group" is the Chrome tab group your tabs go in (default "Agents"); agents claiming the same group share it. Claiming again with the same agent name returns the same port. Optional: "count" for several ports, "color", "parent":"Hermes" for a sub group titled "Hermes › <group>". Ports idle for 30 minutes are released automatically.',
+		"POST /release": '{"agent":"hermes","all":true} -> give your ports back when done ("port" or "ports":[...] for specific ones; "agent" must match). Tabs you opened close, except ones the user has looked at, which are handed back open. "keepTabs":true keeps them all, "closeTabs":true closes them all.',
+		"POST /group": '{"name":"Hermes","color":"yellow"} -> set a tab group\'s color',
+		"POST /group/delete": '{"name":"Hermes"} -> forget a group\'s color (and its sub groups\')',
 		"POST /adopt": '{"agent":"hermes","port":9236,"targetId":"4CD57B02A6B1B8D201AB0080C552A9F1"} -> take over a tab the user opened (needs shareTabs on); it moves into your tab group and other agents can no longer see it. Ids come from GET http://127.0.0.1:<port>/json/list. Release gives it back.',
-		"POST /settings": '{"closeTabsOnRelease":true|false} -> whether release closes the tabs an agent opened, by default (applies at once). {"shareTabs":false} -> agents only see tabs they opened (applies at once). {"shareTabs":true} lets agents see the user\'s own tabs: ONLY when the user asks; it returns a confirmation message to show them, then repeat with "confirm":"<token>"',
+		"POST /settings": '{"shareTabs":false} -> agents only see tabs they opened (applies at once). {"shareTabs":true} lets agents see the user\'s own tabs: ONLY when the user asks; it returns a confirmation message to show them, then repeat with "confirm":"<token>"',
 		"POST /ports": '{"add":5} -> add more ports',
 	},
 	colors: ["blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange", "grey"],
@@ -278,6 +278,7 @@ const ROUTES = {
 			...(connected ? {} : { problem: NOT_CONNECTED }),
 			chromeConnected: connected,
 			...base,
+			ports: (base.ports ?? []).map((p) => (p.agent ? { ...p, idleMinutes: Math.floor(idleMs(p.port) / 60000) } : p)),
 			usedByOtherApps: [...foreign],
 			log: LOG_FILE || null,
 		};
@@ -294,11 +295,6 @@ const ROUTES = {
 	"POST /release": async (body) => {
 		const result = await askExt("release", body);
 		for (const port of result.released) relays.get(port)?.bridge.releaseLaneClaims();
-		return result;
-	},
-	"POST /take": async (body) => {
-		const result = await askExt("take", body);
-		if (result.moved) await startPorts(result.moved);
 		return result;
 	},
 	"POST /settings": (body) => askExt("settings", body),
@@ -342,7 +338,8 @@ try {
 				return srv.upgrade(req, { data: { origin } }) ? undefined : new Response("websocket upgrade required", { status: 426 });
 			}
 			// Web pages send their own Origin; local agents send none or this app's own address.
-			if (!isLocalOrigin(origin, HUB_PORT)) return Response.json({ error: "Forbidden: web pages can't use this API." }, { status: 403 });
+			// The connected extension's own pages (its dashboard) may call the API too.
+			if (!isLocalOrigin(origin, HUB_PORT) && !(ext && origin === ext.data.origin)) return Response.json({ error: "Forbidden: web pages can't use this API." }, { status: 403 });
 			const route = ROUTES[`${req.method} ${url.pathname.replace(/\/+$/, "") || "/"}`];
 			if (!route) return Response.json({ error: "not found", help: HELP }, { status: 404 });
 			try {
@@ -422,4 +419,5 @@ try {
 }
 
 registerAutostart();
+setInterval(() => ext && expireLeases().catch((err) => log("lease expiry failed", { error: String(err) })), EXPIRY_CHECK_MS);
 log(`Agent Multi Tab Use ${VERSION} started`, { hub: HUB, pid: process.pid });

@@ -13,8 +13,8 @@
 // Ownership is kept in chrome.storage.session, so a service-worker restart (Chrome
 // stops idle workers) or an app restart doesn't take agents' tabs away.
 //
-// Named groups: ports can be put in a named group ("Hermes Tab Group"); every
-// port in it files its tabs into that one Chrome tab group.
+// Groups: each port's lease names the Chrome tab group its tabs go in; ports
+// leased under the same name share one group.
 var MAX_PORTS = 250;
 var DEFAULT_PORTS = Array.from({ length: 10 }, (_, i) => 9224 + i);
 var COLORS = ["blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange", "grey"];
@@ -24,28 +24,38 @@ var claims = new Map();
 // Tab -> port that opened it. Releasing a port closes only the tabs that port opened and still owns;
 // tabs it adopted (from the user, or left behind by another agent) are handed back open.
 var createdTabs = new Map();
-var settings = { ports: [], groups: [], shareTabs: false };
+// Tabs an agent opened that the user has since looked at: release hands these back instead of closing them.
+var seenTabs = new Set();
+var settings = { ports: [], leases: {}, groupColors: {}, shareTabs: false };
 
 function validPort(port) {
   return Number.isInteger(port) && port > 0 && port <= 65535;
 }
 async function loadSettings() {
-  const stored = await chrome.storage.local.get({ ports: DEFAULT_PORTS, groups: [], shareTabs: false });
+  const stored = await chrome.storage.local.get({ ports: DEFAULT_PORTS, leases: {}, groupColors: {}, shareTabs: false, groups: null });
   const ports = [...new Set((Array.isArray(stored.ports) ? stored.ports : DEFAULT_PORTS).map(Number).filter(validPort))].slice(0, MAX_PORTS);
-  const groups = (Array.isArray(stored.groups) ? stored.groups : []).filter((g) => g && typeof g.name === "string").map((g) => ({
-    id: String(g.id),
-    name: g.name.trim() || "Tab Group",
-    color: COLORS.includes(g.color) ? g.color : "blue",
-    ports: (Array.isArray(g.ports) ? g.ports : []).map(Number).filter(validPort),
-    ...(typeof g.parent === "string" && g.parent ? { parent: g.parent } : {})
-  }));
-  return { ports, groups, shareTabs: stored.shareTabs === true };
+  let leases = stored.leases && typeof stored.leases === "object" ? stored.leases : {};
+  const groupColors = stored.groupColors && typeof stored.groupColors === "object" ? { ...stored.groupColors } : {};
+  // Up to 1.5, named groups owned their ports and leases were bare agent names.
+  if (Array.isArray(stored.groups)) {
+    for (const g of stored.groups) {
+      if (g && typeof g.name === "string" && COLORS.includes(g.color))
+        groupColors[g.name] ??= g.color;
+    }
+    leases = Object.fromEntries(Object.entries(leases).map(([port, lease]) => [
+      port,
+      typeof lease === "string" ? { agent: lease, group: stored.groups.find((g) => g?.ports?.includes(Number(port)))?.name ?? null, since: Date.now() } : lease
+    ]));
+    await chrome.storage.local.set({ leases, groupColors });
+    await chrome.storage.local.remove(["groups", "closeTabsOnRelease"]);
+  }
+  return { ports, leases, groupColors, shareTabs: stored.shareTabs === true };
 }
 var tabStateSaving = null;
 function saveTabState() {
   tabStateSaving ??= Promise.resolve().then(() => {
     tabStateSaving = null;
-    return chrome.storage.session.set({ tabState: { claims: [...claims], created: [...createdTabs] } });
+    return chrome.storage.session.set({ tabState: { claims: [...claims], created: [...createdTabs], seen: [...seenTabs] } });
   }).catch(() => {});
 }
 async function loadTabState() {
@@ -59,11 +69,17 @@ async function loadTabState() {
     if (alive.has(tabId))
       createdTabs.set(tabId, port);
   }
+  for (const tabId of tabState?.seen ?? []) {
+    if (alive.has(tabId))
+      seenTabs.add(tabId);
+  }
 }
 function laneLook(port) {
-  const group = settings.groups.find((g) => g.ports.includes(port));
-  if (group)
-    return { title: group.name, color: group.color };
+  const title = settings.leases[port]?.group;
+  if (title) {
+    const named = Object.keys(settings.groupColors).find((name) => name.toLowerCase() === title.toLowerCase());
+    return { title, color: settings.groupColors[named] ?? "grey" };
+  }
   const index = Math.max(0, settings.ports.indexOf(port));
   return { title: `Port ${port}`, color: COLORS[index % COLORS.length] };
 }
@@ -396,9 +412,23 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 });
 chrome.tabs.onCreated.addListener(async (tab) => {
   await Promise.allSettled([...inflightCreates]);
+  // A tab an agent's page opened (target=_blank link, window.open) is that agent's: it
+  // joins the agent's group and closes with its other tabs.
+  const opener = tab.openerTabId === undefined ? undefined : claims.get(tab.openerTabId);
+  if (opener !== undefined && tab.id !== undefined && !claims.has(tab.id) && lanes.has(opener)) {
+    claim(lanes.get(opener), tab.id);
+    createdTabs.set(tab.id, opener);
+    saveTabState();
+  }
   const snap = await withTargetId(snapshot(tab));
   if (snap)
-    postVisible(snap.tabId, { t: "tabCreated", tab: snap });
+    postVisible(snap.tabId, { t: "tabCreated", tab: claims.has(snap.tabId) ? { ...snap, claimed: true } : snap });
+});
+chrome.tabs.onActivated.addListener(({ tabId }) => {
+  if (createdTabs.has(tabId) && !seenTabs.has(tabId)) {
+    seenTabs.add(tabId);
+    saveTabState();
+  }
 });
 chrome.tabs.onUpdated.addListener(async (_tabId, _changeInfo, tab) => {
   const snap = await withTargetId(snapshot(tab));
@@ -410,6 +440,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   owners.delete(tabId);
   targetIds.delete(tabId);
   createdTabs.delete(tabId);
+  seenTabs.delete(tabId);
   if (claims.delete(tabId))
     refreshStatus();
   saveTabState();

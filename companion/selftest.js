@@ -7,7 +7,8 @@ const LEASE = process.argv.includes("--lease");
 const TEST_HUB = LEASE ? 9298 : 9299;
 const SCAN_FROM = LEASE ? 9824 : 9724;
 const FOREIGN = 9729;
-const store = { ports: LEASE ? [9824] : [9724, 9725, 9726], groups: [], leases: {} };
+const store = { ports: LEASE ? [9824] : [9724, 9725, 9726], leases: {}, groupColors: {} };
+const removedTabs = [];
 // A stand-in for Chrome behind the extension: tabs per port, answers attach/send/createTab.
 const fakeTabs = new Map();
 let nextTab = 100;
@@ -39,10 +40,11 @@ Object.assign(globalThis, {
 	handleRelayMessage: (lane, msg) => fakeExtension(lane.port, msg),
 	claims: new Map(),
 	createdTabs: new Map(),
-
-	loadSettings: async () => ({ ports: [...store.ports], groups: structuredClone(store.groups), token: "" }),
+	seenTabs: new Set(),
+	loadSettings: async () => ({ ports: [...store.ports], leases: structuredClone(store.leases), groupColors: structuredClone(store.groupColors), shareTabs: store.shareTabs === true }),
 	chrome: {
 		runtime: { getManifest: () => ({ version: "0.0.1-test" }) },
+		tabs: { remove: async (id) => void removedTabs.push(id) },
 		storage: {
 			local: { get: async (d) => ({ ...d, ...Object.fromEntries(Object.keys(d).filter((k) => k in store).map((k) => [k, structuredClone(store[k])])) }), set: async (p) => Object.assign(store, structuredClone(p)) },
 			session: { get: async () => ({ laneStatus: [] }), set: async () => {} },
@@ -109,73 +111,70 @@ try {
 	globalThis.HUB_URL = `ws://127.0.0.1:${TEST_HUB}/ext`;
 	connectHub();
 	await Bun.sleep(800);
-	assert((await api("/")).endpoints["POST /take"], "GET / lists endpoints");
-	const a = await api("/claim", { agent: "hermes", group: "Hermes Tab Group" });
-	assert(a.port === 9724 && a.group === "Hermes Tab Group", "hermes gets 9724 in its new group");
+	assert((await api("/")).endpoints["POST /claim"], "GET / lists endpoints");
+	const a = await api("/claim", { agent: "hermes", group: "Hermes" });
+	assert(a.port === 9724 && a.group === "Hermes", "hermes gets 9724 in its group");
 	const b = await api("/claim", { agent: "codex" });
-	assert(b.port === 9725, "codex gets the next free ungrouped port 9725");
-	const c = await api("/claim", { agent: "hermes-2", group: "hermes tab group" });
-	assert(c.port === 9726 && store.groups[0].ports.includes(9726), "second hermes agent joins the same group (case-insensitive)");
+	assert(b.port === 9725 && b.group === "Agents", "codex (no group given) gets 9725 in the default Agents group");
+	const c = await api("/claim", { agent: "hermes-2", group: "hermes" });
+	assert(c.port === 9726 && c.group === "Hermes", "a second agent claiming the same group (any case) shares it");
 	const d = await api("/claim", { agent: "claude", group: "Claude", count: 4 });
 	const got = d.claimed.map((x) => x.port);
-	assert(got.join() === "9727,9728,9730,9731", `count:4 creates 4 new ports and skips ${FOREIGN} (another app): ${got}`);
+	assert(got.join() === "9727,9728,9730,9731", `count:4 adds ports when the pool is empty, skipping ${FOREIGN} (another app): ${got}`);
 	assert(!store.ports.includes(FOREIGN), "the other app's port was never added");
-	const again = await api("/claim", { agent: "hermes", group: "Hermes Tab Group" });
-	assert(again.port === 9724, "an agent that claims again gets its same port back (no leak)");
+	const again = await api("/claim", { agent: "hermes", group: "Hermes" });
+	assert(again.port === 9724, "an agent that claims again gets its same port back");
 	const again4 = await api("/claim", { agent: "claude", group: "Claude", count: 4 });
 	assert(again4.claimed.map((x) => x.port).join() === got.join() && store.ports.length === 7, "count claims are sticky too, no extra ports created");
 	const e = await api("/claim", { agent: "thief", port: 9724 });
-	assert(/belongs to group|held by/.test(e.error), "can't take a port another agent holds");
-	const f = await api("/claim", { agent: "hermes", group: "Hermes Tab Group", port: 9730 });
-	assert(/belongs to group "Claude".*\/take/.test(f.error), "can't grab another group's port by number; told to use /take");
-	const g = await api("/group", { name: "Hermes Tab Group", ports: [9731] });
-	assert(/belongs to group "Claude"/.test(g.error), "POST /group can't move another group's ports");
-	const busy = await api("/take", { agent: "hermes", from: "Claude", to: "Hermes Tab Group", count: 2 });
-	assert(/only 0 idle/.test(busy.error), "/take refuses ports that are in use");
-	await api("/release", { agent: "claude", ports: [9730, 9731] });
+	assert(/held by hermes/.test(e.error), "can't take a port another agent holds");
 	const wrongRelease = await api("/release", { port: 9726, agent: "codex" });
 	assert(/held by hermes-2/.test(wrongRelease.error), "can't release someone else's port");
-	const ask = await api("/take", { agent: "hermes", from: "Claude", to: "Hermes Tab Group", count: 2 });
-	assert(ask.status === 409 && ask.confirmRequired && /Confirm you want to pull 2 ports \(9730, 9731\) out of the "Claude" group for "Hermes Tab Group"/.test(ask.message), "/take asks for confirmation first");
-	assert(store.groups.find((x) => x.name === "Claude").ports.includes(9730), "nothing moves before confirmation");
-	const forged = await api("/take", { agent: "hermes", from: "Claude", to: "Hermes Tab Group", count: 2, confirm: "nope1234" });
-	assert(/invalid or expired/.test(forged.error), "a made-up confirmation token is refused");
-	const done = await api("/take", { agent: "hermes", from: "Claude", to: "Hermes Tab Group", count: 2, confirm: ask.confirmToken });
-	assert(done.moved?.join() === "9730,9731" && store.groups[0].ports.includes(9731), "confirmed /take moves the ports");
-	const reuse = await api("/take", { agent: "hermes", from: "Claude", to: "Hermes Tab Group", count: 2, confirm: ask.confirmToken });
-	assert(reuse.error, "a confirmation token works only once");
+	await api("/release", { agent: "claude", ports: [9730, 9731] });
+	const reuse = await api("/claim", { agent: "newbie", group: "Hermes" });
+	assert(reuse.port === 9730 && store.ports.length === 7, "a released port goes back to the pool: the next agent gets it, no new port");
 	const relayUp = await fetch("http://127.0.0.1:9724/json/version").then((r) => r.status, () => 0);
 	assert(relayUp === 200, "a relay listens on claimed port 9724 and reaches Chrome over the one extension socket");
-	const add = await api("/ports", { add: 2 });
-	assert(add.added.join() === "9732,9733", "POST /ports adds 9732-9733");
+	const add = await api("/ports", { add: 10 });
+	assert(add.added.length === 10 && store.ports.length === 17, "POST /ports adds ports");
 	const st = await api("/status");
 	assert(st.ports.find((p) => p.port === 9726).agent === "hermes-2" && st.usedByOtherApps.includes(FOREIGN), "GET /status shows holders and other apps' ports");
-	const sub = await api("/claim", { agent: "hermes-research", group: "Research", parent: "Hermes Tab Group" });
-	const subGroup = store.groups.find((x) => x.name === "Hermes Tab Group › Research");
-	assert(sub.group === "Hermes Tab Group › Research" && subGroup?.parent === "Hermes Tab Group", "claim with parent makes a sub group titled 'Parent › Name'");
-	assert(subGroup.color === store.groups.find((x) => x.name === "Hermes Tab Group").color, "sub group inherits its parent's color");
-	const again2 = await api("/claim", { agent: "hermes-research", group: "Hermes Tab Group › Research" });
+	assert(st.groups.find((g) => g.name === "Hermes")?.ports.join() === "9724,9726,9730", "GET /status lists each group with its ports");
+	await api("/release", { agent: "newbie", all: true });
+	assert(store.ports.length === 10, `free ports beyond the spare pool are removed again (${store.ports.length} ports)`);
+
+	// release tidies: closes tabs the agent opened unless the user looked at them
+	claims.set(501, 9725).set(502, 9725).set(503, 9725);
+	createdTabs.set(501, 9725).set(502, 9725);
+	seenTabs.add(502);
+	const tidy = await api("/release", { agent: "codex", port: 9725 });
+	assert(tidy.closedTabs === 1 && removedTabs.join() === "501", "release closes the agent's unseen tab, keeps the one the user looked at and the adopted one");
+	claims.clear();
+
+	const sub = await api("/claim", { agent: "hermes-research", group: "Research", parent: "Hermes" });
+	assert(sub.group === "Hermes › Research", "claim with parent makes a sub group titled 'Parent › Name'");
+	assert(store.groupColors["Hermes › Research"] === store.groupColors.Hermes, "sub group starts in its parent's color");
+	const again2 = await api("/claim", { agent: "hermes-research", group: "Hermes › Research" });
 	assert(again2.port === sub.port, "the full 'Parent › Name' finds the same sub group");
-	const nested = await api("/group", { name: "Deeper", parent: "Hermes Tab Group › Research" });
+	const nested = await api("/group", { name: "Deeper", parent: "Hermes › Research" });
 	assert(/can't have their own sub groups/.test(nested.error), "sub groups are one level deep");
-	const shortDel = await api("/group/delete", { name: "Research" });
-	assert(shortDel.deleted === "Hermes Tab Group › Research", "a sub group can be deleted by its short name");
-	await api("/group", { name: "Scratch", parent: "Codex" });
-	await api("/group/delete", { name: "Codex" });
-	assert(!store.groups.some((x) => x.name.startsWith("Codex")), "deleting a group deletes its sub groups too");
+	const recolor = await api("/group", { name: "hermes", color: "green" });
+	assert(recolor.name === "Hermes" && store.groupColors.Hermes === "green", "POST /group recolors a group");
+	await api("/group/delete", { name: "Hermes" });
+	assert(!Object.keys(store.groupColors).some((n) => n.startsWith("Hermes")), "deleting a group forgets it and its sub groups");
 	await api("/release", { agent: "hermes-research", all: true });
 	const pref = await api("/settings", { closeTabsOnRelease: true });
-	assert(pref.closeTabsOnRelease === true && store.closeTabsOnRelease === true && (await api("/status")).closeTabsOnRelease === true, "closeTabsOnRelease can be switched on, no confirmation needed");
-	await api("/settings", { closeTabsOnRelease: false });
-	assert((await api("/status")).closeTabsOnRelease === false, "and back off");
+	assert(/Nothing to set/.test(pref.message ?? ""), "the old closeTabsOnRelease setting explains the new tidy rule");
+	const take = await api("/take", { agent: "hermes", from: "Claude", to: "Hermes", count: 1 });
+	assert(take.status === 404, "/take is gone (ports aren't tied to groups any more)");
 	const warn = await api("/status");
 	assert(warn.extension === "0.0.1-test" && /versions differ/.test(warn.warning ?? ""), "GET /status warns agents when extension and app versions differ");
 	const off = await api("/settings", { agent: "hermes", shareTabs: false });
 	assert(off.shareTabs === false && store.shareTabs === false, "shareTabs:false applies at once");
 	const askShare = await api("/settings", { agent: "hermes", shareTabs: true });
 	assert(askShare.status === 409 && /Confirm you want to let every agent see/.test(askShare.message) && store.shareTabs === false, "shareTabs:true asks the user first and changes nothing yet");
-	const fakeShare = await api("/settings", { agent: "hermes", shareTabs: true, confirm: ask.confirmToken });
-	assert(/invalid or expired/.test(fakeShare.error), "a /take token can't be reused to turn sharing on");
+	const fakeShare = await api("/settings", { agent: "hermes", shareTabs: true, confirm: "nope1234" });
+	assert(/invalid or expired/.test(fakeShare.error), "a made-up confirmation token is refused");
 	const share = await api("/settings", { agent: "hermes", shareTabs: true, confirm: askShare.confirmToken });
 	assert(share.shareTabs === true && store.shareTabs === true, "confirmed shareTabs:true turns sharing on");
 	const web = await fetch(`http://127.0.0.1:${TEST_HUB}/status`, { headers: { Origin: "https://evil.example" } });

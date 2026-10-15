@@ -859,6 +859,8 @@ export class RelayBridge {
 			tab.update(snap);
 		}
 		if (opts.silent) return;
+		// A tab the extension says this port owns (e.g. a popup an agent's page opened) is driven by it.
+		if (snap.claimed) this.#laneClaims.add(snap.tabId);
 		const eligible = this.#eligible(tab);
 		this.#syncTabGrouping(tab);
 		if (eligible && !tab.announced) {
