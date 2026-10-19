@@ -157,6 +157,9 @@ var hubOps = {
       : [...claims].filter(([tabId, owner]) => list.includes(owner) && createdTabs.get(tabId) === owner && (closeTabs === true || !seenTabs.has(tabId))).map(([tabId]) => tabId);
     // One at a time: chrome.tabs.remove([...]) closes nothing if any id is already gone.
     const closedTabs = (await Promise.all(closing.map((id) => chrome.tabs.remove(id).then(() => 1, () => 0)))).reduce((a, b) => a + b, 0);
+    // Tabs left open go back to the user; still claimed, they'd show up for the port's next agent.
+    for (const p of list)
+      await releasePortTabs(p);
     return { released: list, closedTabs };
   },
   // Turning sharing off is always allowed at once; turning it on exposes the

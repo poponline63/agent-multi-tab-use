@@ -41,6 +41,14 @@ Object.assign(globalThis, {
 	claims: new Map(),
 	createdTabs: new Map(),
 	seenTabs: new Set(),
+	// Mirrors background.js: unclaim the port's tabs and tell its relay they're gone.
+	releasePortTabs: async (port) => {
+		for (const [tabId, owner] of [...claims]) {
+			if (owner !== port) continue;
+			claims.delete(tabId);
+			hubSend({ t: "lane", port, msg: { t: "tabRemoved", tabId } });
+		}
+	},
 	loadSettings: async () => ({ ports: [...store.ports], leases: structuredClone(store.leases), groupColors: structuredClone(store.groupColors), shareTabs: store.shareTabs === true }),
 	chrome: {
 		runtime: { getManifest: () => ({ version: "0.0.1-test" }), reload: () => {} },
@@ -147,8 +155,14 @@ try {
 	claims.set(501, 9725).set(502, 9725).set(503, 9725);
 	createdTabs.set(501, 9725).set(502, 9725);
 	seenTabs.add(502);
+	hubSend({ t: "lane", port: 9725, msg: { t: "tabCreated", tab: { tabId: 502, url: "https://x.com/i/history", title: "History", active: false, windowId: 1, pinned: false, groupId: -1, claimed: true } } });
+	await Bun.sleep(100);
+	const listed = async () => (await fetch("http://127.0.0.1:9725/json/list").then((r) => r.json())).map((t) => t.url);
+	assert((await listed()).includes("https://x.com/i/history"), "the agent's tab is listed on its port while it holds the lease");
 	const tidy = await api("/release", { agent: "codex", port: 9725 });
 	assert(tidy.closedTabs === 1 && removedTabs.join() === "501", "release closes the agent's unseen tab, keeps the one the user looked at and the adopted one");
+	await Bun.sleep(100);
+	assert(![...claims.values()].includes(9725) && (await listed()).length === 0, "kept tabs go back to the user: unclaimed and no longer listed to the port's next agent");
 	claims.clear();
 
 	const sub = await api("/claim", { agent: "hermes-research", group: "Research", parent: "Hermes" });

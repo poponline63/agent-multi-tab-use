@@ -162,6 +162,10 @@ async function release(tabId) {
   saveTabState();
   chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
   refreshStatus();
+  // The old owner's relay must forget it too, or its port keeps listing the tab to whoever holds the port next.
+  const ownerLane = lanes.get(owner);
+  if (ownerLane && !visibleTo(ownerLane, tabId))
+    post(ownerLane, { t: "tabRemoved", tabId });
   const snap = await chrome.tabs.get(tabId).then(snapshot, () => null).then(withTargetId);
   if (!snap)
     return;
@@ -366,14 +370,25 @@ function lanesClosed() {
     lane.open = false;
   refreshStatus();
 }
-async function dropLane(lane) {
-  lanes.delete(lane.port);
-  const mine = claimedBy(lane.port);
+// Hands a port's tabs back to the user: out of its group, unclaimed, debugger off.
+async function releasePortTabs(port) {
+  const mine = claimedBy(port);
   if (mine.length)
     await enqueueGroupOp(() => chrome.tabs.ungroup(mine).catch(() => {}));
   await Promise.all(mine.map(release));
   for (const tabId of [...owners.keys()])
-    await detachFor(lane.port, tabId);
+    await detachFor(port, tabId);
+}
+async function dropLane(lane) {
+  lanes.delete(lane.port);
+  await releasePortTabs(lane.port);
+}
+// Claims left on ports nobody leases (from before release handed tabs back) would go to the port's next agent.
+async function releaseUnleasedTabs() {
+  for (const port of new Set(claims.values())) {
+    if (!settings.leases[port])
+      await releasePortTabs(port);
+  }
 }
 async function applySettings() {
   const next = await loadSettings();
@@ -397,7 +412,7 @@ async function applySettings() {
 importScripts("hub-client.js");
 var ready = null;
 function start() {
-  ready ??= loadTabState().then(applySettings);
+  ready ??= loadTabState().then(applySettings).then(releaseUnleasedTabs);
   return ready.then(connectHub);
 }
 chrome.debugger.onEvent.addListener((source, method, params) => {
