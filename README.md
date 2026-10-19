@@ -46,7 +46,7 @@ To stop the app: **Quit** in the tray menu, or `AgentMultiTabUse.exe --quit`.
 - **An agent gets an error**: the message says why (Chrome's own reason for a tab it can't debug, or that Chrome isn't connected). Agents ride out short gaps on their own: commands wait up to 10 seconds while the extension or app reconnects, and agents keep their tabs across restarts.
 - **Anything else**: right-click the tray icon, **Open log** (`%LOCALAPPDATA%\Agent Multi Tab Use\hub.log`).
 
-Ports are one shared pool: a released port goes to the next agent, and spare ones are removed again, so the list doesn't keep growing. An agent that forgets to release is released after 30 idle minutes, and its leftover tabs are tidied the same way (tabs you've looked at stay open). Popups and links an agent's page opens join that agent's tab group.
+Ports are one shared pool: a released port goes to the next agent, and spare ones are removed again, so the list doesn't keep growing. An agent that forgets to release is released after 60 idle minutes, and its leftover tabs are tidied the same way (tabs you've looked at stay open). Popups and links an agent's page opens join that agent's tab group.
 
 ## Give an agent access
 

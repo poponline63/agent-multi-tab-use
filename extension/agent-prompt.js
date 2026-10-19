@@ -44,7 +44,7 @@ STEP 3: WHEN YOU'RE DONE (always, even after a quick lookup)
   release your ports: POST ${HUB}/release  {"agent":"your-name","all":true}
   Release tidies up for you: tabs you opened close, except ones the user has looked at, which stay open for
   them. If the user wants your tabs kept, add "keepTabs": true; to close even ones they looked at, "closeTabs": true.
-  Forgot to release? After 30 minutes without use your port is released the same way.
+  Forgot to release? After 60 minutes without use your port is released the same way.
 
 WHAT YOU CAN SEE
   ${seeLine}

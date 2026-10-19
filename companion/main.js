@@ -16,7 +16,7 @@ import { basename, join } from "node:path";
 import { isLocalHost, isLocalOrigin, startRelayServer } from "./relay/server.ts";
 import trayExe from "./tray/tray.exe" with { type: "file" };
 
-const VERSION = "1.6.5";
+const VERSION = "1.6.6";
 const HUB_PORT = Number(process.env.AMTU_HUB_PORT || 9223);
 const SCAN_FROM = Number(process.env.AMTU_SCAN_FROM || 9224);
 const SCAN_COUNT = 300;
@@ -26,7 +26,7 @@ const RPC_TIMEOUT_MS = 10000;
 const READY_TIMEOUT_MS = Number(process.env.AMTU_READY_MS || 20000);
 // A claimed port nobody has used for this long is released for its agent (agents
 // often finish without releasing): tidied like a normal release, back in the pool.
-const LEASE_IDLE_MS = Number(process.env.AMTU_LEASE_IDLE_MS || 30 * 60 * 1000);
+const LEASE_IDLE_MS = Number(process.env.AMTU_LEASE_IDLE_MS || 60 * 60 * 1000);
 const EXPIRY_CHECK_MS = 5 * 60 * 1000;
 const IS_EXE = basename(process.execPath).toLowerCase() === "agentmultitabuse.exe";
 const HUB = `http://127.0.0.1:${HUB_PORT}`;
@@ -269,7 +269,7 @@ const HELP = {
 	version: VERSION,
 	endpoints: {
 		"GET /status": "all ports, their tab group, which agent holds them, whether they are live, and ports other apps use",
-		"POST /claim": '{"agent":"hermes","group":"Hermes"} -> your own port + CDP URL. "group" is the Chrome tab group your tabs go in (default "Agents"); agents claiming the same group share it. Claiming again with the same agent name returns the same port. Optional: "count" for several ports, "color", "parent":"Hermes" for a sub group titled "Hermes › <group>". Ports idle for 30 minutes are released automatically.',
+		"POST /claim": '{"agent":"hermes","group":"Hermes"} -> your own port + CDP URL. "group" is the Chrome tab group your tabs go in (default "Agents"); agents claiming the same group share it. Claiming again with the same agent name returns the same port. Optional: "count" for several ports, "color", "parent":"Hermes" for a sub group titled "Hermes › <group>". Ports idle for 60 minutes are released automatically.',
 		"POST /release": '{"agent":"hermes","all":true} -> give your ports back when done ("port" or "ports":[...] for specific ones; "agent" must match). Tabs you opened close, except ones the user has looked at, which are handed back open. "keepTabs":true keeps them all, "closeTabs":true closes them all.',
 		"POST /group": '{"name":"Hermes","color":"yellow"} -> set a tab group\'s color',
 		"POST /group/delete": '{"name":"Hermes"} -> forget a group\'s color (and its sub groups\')',
