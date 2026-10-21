@@ -139,7 +139,20 @@ class TabState {
 /** URLs `chrome.debugger` cannot attach to; hidden from downstream discovery entirely. */
 const INELIGIBLE_URL = /^(chrome|devtools|edge|view-source|chrome-extension|chrome-untrusted|chrome-search):/i;
 
-const RPC_TIMEOUT_MS = 20_000;
+const RPC_TIMEOUT_MS = Number(process.env.AMTU_RPC_TIMEOUT_MS || 20_000);
+/**
+ * Commands that legitimately outlive a UI round-trip: a screenshot or a PDF of a
+ * heavy page can take longer than 20s on a slow machine, and the old blanket
+ * timeout failed the call while Chrome was still working. They get their own
+ * ceiling instead of being cancelled mid-flight.
+ */
+const SLOW_CDP_METHODS = new Set([
+	"Page.captureScreenshot",
+	"Page.captureSnapshot",
+	"Page.printToPDF",
+	"DOM.getSnapshot",
+]);
+const SLOW_RPC_TIMEOUT_MS = Number(process.env.AMTU_SLOW_RPC_MS || 120_000);
 /** How long a command waits for the extension to (re)connect before failing; a service-worker restart takes ~1s. */
 const EXT_WAIT_MS = Number(process.env.AMTU_EXT_WAIT_MS || 10_000);
 /** Attach errors that won't go away by retrying (the page itself can't be debugged). */
@@ -514,13 +527,16 @@ export class RelayBridge {
 			return;
 		}
 		try {
-			const result = await this.#rpc({
-				op: "send",
-				tabId,
-				sessionId: realSessionId,
-				method: msg.method,
-				params: msg.params,
-			});
+			const result = await this.#rpc(
+				{
+					op: "send",
+					tabId,
+					sessionId: realSessionId,
+					method: msg.method,
+					params: msg.params,
+				},
+				SLOW_CDP_METHODS.has(msg.method) ? SLOW_RPC_TIMEOUT_MS : RPC_TIMEOUT_MS,
+			);
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));

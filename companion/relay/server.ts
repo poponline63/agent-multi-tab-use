@@ -1,4 +1,4 @@
-﻿/**
+/**
  * HTTP + WebSocket server for the browser relay.
  *
  * Impersonates Chrome's CDP discovery endpoint so the omp browser tool (and
@@ -136,7 +136,11 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 			if (path === "/json/new") {
 				if (req.method !== "PUT" && req.method !== "GET") return new Response("Method not allowed", { status: 405 });
 				if (!(await bridge.waitReady())) return notReady();
-				const target = url.search.length > 1 ? decodeURIComponent(url.search.slice(1)) : "about:blank";
+				// Chrome's own /json/new takes the URL as a bare query (`?<url>`); clients
+				// that follow the DevTools HTTP convention send `?url=<url>` instead.
+				// Accept both rather than opening a tab whose address is literally "url=".
+				const search = url.search.length > 1 ? url.search.slice(1) : "";
+				const target = search ? decodeURIComponent(search.replace(/^url=/, "")) : "about:blank";
 				try {
 					return Response.json({ ...(await bridge.createTabForHttp(target)), webSocketDebuggerUrl: `ws://${host}/cdp` });
 				} catch (err) {
