@@ -70,6 +70,10 @@ function nextPort(s, avoid) {
 function ownedPorts() {
   return new Set(typeof claims === "undefined" ? [] : claims.values());
 }
+// Port -> the agent that held it last, so an agent whose lease expired gets its
+// port (and the tabs it kept opening there) back when it claims again.
+// ponytail: in memory only; a worker restart also hands unleased tabs back (releaseUnleasedTabs).
+var lastHolder = new Map();
 // Free ports beyond a small spare pool are removed again, highest first, so the
 // list shrinks back after a busy spell instead of only ever growing.
 function trimPool(s) {
@@ -95,7 +99,7 @@ var hubOps = {
       agent: s.leases[port]?.agent ?? null,
       since: s.leases[port]?.since ?? null,
       live: !!live.get(port)?.open,
-      tabs: live.get(port)?.tabs ?? 0
+      tabs: typeof claims === "undefined" ? live.get(port)?.tabs ?? 0 : [...claims.values()].filter((p) => p === port).length
     }));
     const groups = [...new Set(ports.map((p) => p.group).filter(Boolean))].map((name) => ({
       name,
@@ -106,14 +110,16 @@ var hubOps = {
   },
   // Picks, in order: ports this agent already holds (so an agent that comes back
   // gets the same ports), the lowest free port, then a new port. count > 1 claims several.
-  async claim({ agent = "agent", group, parent, color, port, count = 1, avoid = [] } = {}) {
+  // "busy" (from the app) lists ports with an agent connected right now.
+  async claim({ agent = "agent", group, parent, color, port, count = 1, avoid = [], busy = [] } = {}) {
     const s = await readAll();
     trimPool(s);
     agent = String(agent).slice(0, 60);
     const n = Math.max(1, Math.min(Math.floor(Number(count)) || 1, MAX_PORTS));
     const title = group || parent ? groupTitle(s, group || parent, group ? parent : null, color) : null;
     const owned = ownedPorts();
-    const free = (p) => !s.leases[p] && !owned.has(p) && !avoid.includes(p);
+    const inUse = (p) => owned.has(p) || busy.includes(p);
+    const free = (p) => !s.leases[p] && !inUse(p) && !avoid.includes(p);
     const picks = [];
     if (port !== undefined) {
       const want = Number(port);
@@ -121,13 +127,15 @@ var hubOps = {
         throw new Error(`port ${port} can't be used (invalid, the hub's own port, or used by another app)`);
       if (s.leases[want] && s.leases[want].agent !== agent)
         throw new Error(`port ${want} is held by ${s.leases[want].agent}`);
+      if (!s.leases[want] && inUse(want) && lastHolder.get(want) !== agent)
+        throw new Error(`port ${want} still has another agent's tabs or connection on it; claim without "port" to get a free one`);
       if (!s.ports.includes(want))
         s.ports.push(want);
       picks.push(want);
     } else {
       const pool = [...s.ports].sort((a, b) => a - b);
       while (picks.length < n) {
-        const held = pool.find((p) => s.leases[p]?.agent === agent && !picks.includes(p) && !avoid.includes(p));
+        const held = pool.find((p) => (s.leases[p]?.agent ?? lastHolder.get(p)) === agent && !picks.includes(p) && !avoid.includes(p));
         picks.push(held ?? pool.find((p) => free(p) && !picks.includes(p)) ?? nextPort(s, avoid));
       }
     }
@@ -156,8 +164,13 @@ var hubOps = {
       if (holder && holder !== agent)
         throw new Error(agent ? `port ${p} is held by ${holder}, not ${agent}` : `port ${p} is held by ${holder}; send "agent":"${holder}" to release it`);
     }
-    for (const p of list)
+    for (const p of list) {
+      if (s.leases[p])
+        lastHolder.set(p, s.leases[p].agent);
+      else
+        lastHolder.delete(p);
       delete s.leases[p];
+    }
     trimPool(s);
     await save(s);
     const closing = keepTabs === true || typeof claims === "undefined"

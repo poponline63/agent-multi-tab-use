@@ -210,17 +210,19 @@ function idleMs(port) {
 
 // Releases ports no agent has touched for LEASE_IDLE_MS, closing the tabs they
 // left behind (unless the user looked at them), so dead agents don't pile up.
+// Ports with tabs but no lease (an agent kept going after its lease expired) are
+// tidied the same way, or they'd never count as free again.
 async function expireLeases() {
 	const idle = (port) => idleMs(port) > LEASE_IDLE_MS;
 	const { ports } = await askExt("status");
 	const byAgent = new Map();
 	for (const p of ports) {
-		if (p.agent && idle(p.port)) byAgent.set(p.agent, [...(byAgent.get(p.agent) ?? []), p.port]);
+		if (idle(p.port) && (p.agent || p.tabs > 0)) byAgent.set(p.agent, [...(byAgent.get(p.agent) ?? []), p.port]);
 	}
 	for (const [agent, list] of byAgent) {
-		await askExt("release", { agent, ports: list });
+		await askExt("release", agent ? { agent, ports: list } : { ports: list });
 		for (const port of list) relays.get(port)?.bridge.releaseLaneClaims();
-		log("expired idle leases", { agent, ports: list });
+		log(agent ? "expired idle leases" : "tidied idle tabs on unleased ports", { agent, ports: list });
 	}
 }
 
@@ -301,7 +303,8 @@ const ROUTES = {
 	},
 	"POST /claim": async (body) => {
 		await expireLeases();
-		const result = await askExt("claim", { ...body, avoid: await scanForeign() });
+		const busy = [...relays].filter(([, relay]) => relay.bridge.connections > 0).map(([port]) => port);
+		const result = await askExt("claim", { ...body, avoid: await scanForeign(), busy });
 		const list = result.claimed ?? [result];
 		for (const c of list) lastActive.set(c.port, Date.now());
 		const ready = await startPorts(list.map((c) => c.port));

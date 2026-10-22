@@ -104,6 +104,13 @@ if (LEASE) {
 		await Bun.sleep(1200);
 		const next = await api("/claim", { agent: "newcomer" });
 		assert(next.port === first.port && !store.ports.includes(first.port + 2), `a lease idle past the limit goes back to the pool (got ${next.port}, wanted ${first.port})`);
+		await api("/release", { agent: "newcomer", all: true });
+		// An agent kept opening tabs after its lease expired, then went quiet too.
+		claims.set(700, first.port);
+		createdTabs.set(700, first.port);
+		await Bun.sleep(1200);
+		const third = await api("/claim", { agent: "third" });
+		assert(removedTabs.includes(700) && third.port === first.port, `idle tabs on a port nobody leases are tidied, and the port is free again (got ${third.port})`);
 	} catch (err) {
 		console.error(err.message);
 		process.exitCode = 1;
@@ -168,13 +175,19 @@ try {
 	assert(![...claims.values()].includes(9725) && (await listed()).length === 0, "kept tabs go back to the user: unclaimed and no longer listed to the port's next agent");
 	claims.clear();
 
-	// An agent whose lease expired can keep opening tabs on its old port; that port isn't free.
+	// codex's lease on 9725 is gone, but codex keeps opening tabs there.
 	claims.set(601, 9725);
 	createdTabs.set(601, 9725);
 	const late = await api("/claim", { agent: "late" });
 	assert(late.port !== 9725, `a port that still has another agent's tabs is not handed out (got ${late.port})`);
+	const byNumber = await api("/claim", { agent: "late-2", port: 9725 });
+	assert(/still has another agent's tabs/.test(byNumber.error ?? ""), "nor can it be claimed by number");
+	const back = await api("/claim", { agent: "codex" });
+	assert(back.port === 9725, `the agent that held it last gets its port and tabs back (got ${back.port})`);
 	await api("/release", { agent: "late", all: true });
-	assert(!removedTabs.includes(601), "so releasing the new agent's port never closes the other agent's tabs");
+	assert(!removedTabs.includes(601), "releasing another agent's port never closes codex's tab");
+	await api("/release", { agent: "codex", all: true });
+	assert(removedTabs.includes(601), "codex's own release still tidies its tab");
 	claims.clear();
 	createdTabs.clear();
 
@@ -229,6 +242,11 @@ try {
 	globalThis.hub.ws.close();
 	const during = await send("Runtime.evaluate", { expression: "1" }, attached.result?.sessionId);
 	assert(/says hi/.test(during.result?.result?.value ?? ""), `a command sent while the extension reconnects waits and succeeds, same session: ${JSON.stringify(during.result ?? during.error)}`);
+	await api("/release", { agent: "cdp-test", all: true });
+	claims.clear();
+	const connected = await api("/claim", { agent: "after-cdp" });
+	assert(connected.port !== cdpPort, `a port with an agent still connected is not handed out, even with no lease or tabs (got ${connected.port})`);
+	await api("/release", { agent: "after-cdp", all: true });
 	cdp.close();
 
 	// ---- safety ----
