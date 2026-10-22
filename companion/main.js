@@ -16,7 +16,7 @@ import { basename, join } from "node:path";
 import { isLocalHost, isLocalOrigin, startRelayServer } from "./relay/server.ts";
 import trayExe from "./tray/tray.exe" with { type: "file" };
 
-const VERSION = "1.6.7";
+const VERSION = "1.6.8";
 const HUB_PORT = Number(process.env.AMTU_HUB_PORT || 9223);
 const SCAN_FROM = Number(process.env.AMTU_SCAN_FROM || 9224);
 const SCAN_COUNT = 300;
