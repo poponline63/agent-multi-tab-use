@@ -220,7 +220,13 @@ async function expireLeases() {
 		if (idle(p.port) && (p.agent || p.tabs > 0)) byAgent.set(p.agent, [...(byAgent.get(p.agent) ?? []), p.port]);
 	}
 	for (const [agent, list] of byAgent) {
-		await askExt("release", agent ? { agent, ports: list } : { ports: list });
+		// An agent can claim one of these ports between the status read and this release; skip it, keep going.
+		try {
+			await askExt("release", agent ? { agent, ports: list } : { ports: list });
+		} catch (err) {
+			log("lease expiry skipped", { agent, ports: list, error: String(err) });
+			continue;
+		}
 		for (const port of list) relays.get(port)?.bridge.releaseLaneClaims();
 		log(agent ? "expired idle leases" : "tidied idle tabs on unleased ports", { agent, ports: list });
 	}

@@ -56,7 +56,7 @@ function renderAgents(status) {
 			row.style.setProperty("--c", `var(--${colorOf.get(p.group) ?? "grey"})`);
 			return row;
 		});
-	const free = status.ports.length - held.length;
+	const free = status.ports.filter((p) => !p.agent && !p.tabs).length;
 	const foot = el("p", { className: "empty", textContent: `${free} free ${free === 1 ? "port" : "ports"} ready for the next agent.` });
 	$("agents").replaceChildren(...(rows.length ? rows : [el("p", { className: "empty", textContent: "No agents right now." })]), foot);
 }
