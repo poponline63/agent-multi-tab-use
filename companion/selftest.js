@@ -104,10 +104,13 @@ if (LEASE) {
 		await Bun.sleep(1200);
 		const next = await api("/claim", { agent: "newcomer" });
 		assert(next.port === first.port && !store.ports.includes(first.port + 2), `a lease idle past the limit goes back to the pool (got ${next.port}, wanted ${first.port})`);
+	} catch (err) {
+		console.error(err.message);
+		process.exitCode = 1;
 	} finally {
 		hub.kill();
 	}
-	process.exit(0);
+	process.exit();
 }
 
 try {
@@ -164,6 +167,16 @@ try {
 	await Bun.sleep(100);
 	assert(![...claims.values()].includes(9725) && (await listed()).length === 0, "kept tabs go back to the user: unclaimed and no longer listed to the port's next agent");
 	claims.clear();
+
+	// An agent whose lease expired can keep opening tabs on its old port; that port isn't free.
+	claims.set(601, 9725);
+	createdTabs.set(601, 9725);
+	const late = await api("/claim", { agent: "late" });
+	assert(late.port !== 9725, `a port that still has another agent's tabs is not handed out (got ${late.port})`);
+	await api("/release", { agent: "late", all: true });
+	assert(!removedTabs.includes(601), "so releasing the new agent's port never closes the other agent's tabs");
+	claims.clear();
+	createdTabs.clear();
 
 	const sub = await api("/claim", { agent: "hermes-research", group: "Research", parent: "Hermes" });
 	assert(sub.group === "Hermes › Research", "claim with parent makes a sub group titled 'Parent › Name'");
@@ -237,10 +250,13 @@ try {
 	const lease = Bun.spawnSync(["bun", import.meta.path, "--lease"], { stdout: "inherit", stderr: "inherit" });
 	assert(lease.exitCode === 0, "idle lease expiry check passed");
 	console.log("\nall hub checks passed");
+} catch (err) {
+	console.error(err.message);
+	process.exitCode = 1;
 } finally {
 	hub.kill();
 	other?.stop(true);
-	process.exit(0);
+	process.exit();
 }
 
 

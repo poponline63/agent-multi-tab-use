@@ -64,10 +64,17 @@ function nextPort(s, avoid) {
   s.ports.push(port);
   return port;
 }
+// Ports that still own tabs. Such a port isn't free even without a lease: an agent
+// whose lease expired may still be using it, and the next holder's release would
+// close that agent's tabs.
+function ownedPorts() {
+  return new Set(typeof claims === "undefined" ? [] : claims.values());
+}
 // Free ports beyond a small spare pool are removed again, highest first, so the
 // list shrinks back after a busy spell instead of only ever growing.
 function trimPool(s) {
-  const free = s.ports.filter((p) => !s.leases[p]).sort((a, b) => b - a);
+  const owned = ownedPorts();
+  const free = s.ports.filter((p) => !s.leases[p] && !owned.has(p)).sort((a, b) => b - a);
   let removable = Math.min(free.length - POOL_SPARE, s.ports.length - POOL_FLOOR);
   for (const port of free) {
     if (removable-- <= 0)
@@ -105,7 +112,8 @@ var hubOps = {
     agent = String(agent).slice(0, 60);
     const n = Math.max(1, Math.min(Math.floor(Number(count)) || 1, MAX_PORTS));
     const title = group || parent ? groupTitle(s, group || parent, group ? parent : null, color) : null;
-    const free = (p) => !s.leases[p] && !avoid.includes(p);
+    const owned = ownedPorts();
+    const free = (p) => !s.leases[p] && !owned.has(p) && !avoid.includes(p);
     const picks = [];
     if (port !== undefined) {
       const want = Number(port);
