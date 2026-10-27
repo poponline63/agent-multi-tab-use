@@ -52,7 +52,19 @@ Ports are one shared pool: a released port goes to the next agent, and spare one
 
 Open the dashboard, go to **Agent setup**, pick a group, and click **Copy for agent**. Paste that into your agent. It explains everything below with ready-to-run snippets.
 
-Quick version:
+### MCP server (easiest)
+
+Any MCP agent (Codex, OpenCode, Claude Code, Hermes, oh-my-pi, ...) can use `mcp/server.mjs` instead of writing CDP code. Node 22+, no dependencies. It claims a port on first use, keeps the agent's tabs in its own group, and releases the port when the agent exits.
+
+Tools: `browser_open`, `browser_read` (page text + numbered elements), `browser_click`, `browser_type`, `browser_screenshot`, `browser_eval`, `browser_tabs`, `browser_close`, `browser_claim`, `browser_release`.
+
+```json
+{ "command": "node", "args": ["<repo>/mcp/server.mjs"], "env": { "AMTU_AGENT": "codex", "AMTU_GROUP": "Codex" } }
+```
+
+`AMTU_AGENT` names the agent (the process id is added, so two sessions never share a port), `AMTU_GROUP` is its Chrome tab group. Check it against your live Chrome with `node mcp/selfcheck.mjs`.
+
+### Raw API
 
 ```bash
 # 1. claim a port (same agent name = same port back)
