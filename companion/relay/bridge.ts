@@ -156,7 +156,9 @@ const SLOW_RPC_TIMEOUT_MS = Number(process.env.AMTU_SLOW_RPC_MS || 120_000);
 /** How long a command waits for the extension to (re)connect before failing; a service-worker restart takes ~1s. */
 const EXT_WAIT_MS = Number(process.env.AMTU_EXT_WAIT_MS || 10_000);
 /** Attach errors that won't go away by retrying (the page itself can't be debugged). */
-const PERMANENT_ATTACH_ERROR = /Cannot access|Cannot attach to this target/i;
+export const PERMANENT_ATTACH_ERROR = /Cannot access(?! a chrome-extension:\/\/ URL of different extension)|Cannot attach to this target/i;
+/** Another extension (captcha solver, password manager, coupon finder) put a frame in the page; it can go away, so retry. */
+const FOREIGN_EXTENSION_FRAME = /URL of different extension/i;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
 
@@ -1075,7 +1077,10 @@ export class RelayBridge {
 
 	#attachFailure(tab: TabState): string {
 		const why = tab.banned && !tab.attachError ? "the user closed the debugging bar on it" : tab.attachError || "unknown error";
-		return `Cannot attach to tab ${tab.tabId} (${tab.url}): ${why}`;
+		const hint = FOREIGN_EXTENSION_FRAME.test(why)
+			? " (another Chrome extension has a frame in this page; Chrome blocks debugging until it is gone. Retry, or ask the user to set that extension's site access to 'On click')"
+			: "";
+		return `Cannot attach to tab ${tab.tabId} (${tab.url}): ${why}${hint}`;
 	}
 
 	#eligible(tab: TabState): boolean {

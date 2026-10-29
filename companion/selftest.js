@@ -264,6 +264,9 @@ try {
 	assert(/held by holder; send "agent"/.test(anon.error ?? ""), "release without the holder's agent name is refused");
 	await api("/release", { port: held, agent: "holder" });
 
+	const { PERMANENT_ATTACH_ERROR } = await import("./relay/bridge.ts");
+	assert(PERMANENT_ATTACH_ERROR.test("Cannot access a chrome:// URL") && !PERMANENT_ATTACH_ERROR.test("Cannot access a chrome-extension:// URL of different extension"), "another extension's frame in a page doesn't ban the tab; chrome:// pages still do");
+
 	// ---- idle leases go back to the pool (separate hub with a short idle time) ----
 	const lease = Bun.spawnSync(["bun", import.meta.path, "--lease"], { stdout: "inherit", stderr: "inherit" });
 	assert(lease.exitCode === 0, "idle lease expiry check passed");
