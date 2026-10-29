@@ -29,7 +29,7 @@ const init = await rpc("initialize", { protocolVersion: "2025-06-18", capabiliti
 assert.equal(init.result.serverInfo.name, "agent-multi-tab-use");
 const { result: list } = await rpc("tools/list", {});
 const names = list.tools.map((t) => t.name);
-for (const n of ["browser_claim", "browser_open", "browser_read", "browser_click", "browser_type", "browser_screenshot", "browser_release"]) assert.ok(names.includes(n), n);
+for (const n of ["browser_claim", "browser_open", "browser_read", "browser_click", "browser_type", "browser_screenshot", "browser_wait_captcha", "browser_release"]) assert.ok(names.includes(n), n);
 
 assert.match(await text("browser_claim"), /port \d+/);
 assert.match(await text("browser_open", { url: "https://example.com" }), /Example Domain/);
@@ -45,7 +45,10 @@ const [shot] = await call("browser_screenshot");
 assert.equal(shot.type, "image");
 assert.equal(Buffer.from(shot.data, "base64").subarray(1, 4).toString(), "PNG");
 assert.equal(await text("browser_eval", { js: "1 + 1" }), "2");
-assert.equal((await text("browser_tabs")).split("\n").length, 2);
+assert.equal(await text("browser_wait_captcha"), "no captcha on this page");
+assert.match(await text("browser_open", { url: "https://www.google.com/recaptcha/api2/demo" }), /recaptcha/i);
+assert.match(await text("browser_wait_captcha", { timeoutSec: 6 }), /still unsolved after 6s/);
+assert.equal((await text("browser_tabs")).split("\n").length, 3);
 assert.match(await text("browser_release"), /released port/);
 const err = (await rpc("tools/call", { name: "browser_read", arguments: {} })).result;
 assert.ok(err.isError, "read after release must fail cleanly");
