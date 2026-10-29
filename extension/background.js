@@ -261,6 +261,54 @@ async function wake(tabId) {
   for (let i = 0; i < 50 && (await chrome.tabs.get(tabId)).status !== "complete"; i++)
     await new Promise((resolve) => setTimeout(resolve, 200));
 }
+// Chrome refuses (and drops) a debugger on any page holding another extension's frame:
+// Bitwarden's autofill menu, captcha solvers, coupon finders. In agent tabs only, remove
+// such frames the moment they're inserted, before they load; the user's tabs are untouched.
+// ponytail: re-injected per navigation, so a frame an extension adds at document_start
+// can win the race; and a shadow root attached after its host is in the page is missed.
+function guardForeignFrames(tabId, frameId) {
+  return chrome.scripting.executeScript({
+    target: frameId === undefined ? { tabId, allFrames: true } : { tabId, frameIds: [frameId] },
+    injectImmediately: true,
+    args: [`chrome-extension://${chrome.runtime.id}/`],
+    func: (own) => {
+      if (globalThis.__amtuFrameGuard)
+        return;
+      globalThis.__amtuFrameGuard = true;
+      const seen = new WeakSet();
+      const foreign = (el) => {
+        const url = el.src || el.data || "";
+        return /^(IFRAME|FRAME|EMBED|OBJECT)$/.test(el.tagName) && url.startsWith("chrome-extension://") && !url.startsWith(own);
+      };
+      const check = (node) => {
+        if (node.nodeType !== 1)
+          return;
+        for (const el of [node, ...node.querySelectorAll("*")]) {
+          if (foreign(el)) {
+            el.remove();
+            continue;
+          }
+          const root = chrome.dom.openOrClosedShadowRoot(el);
+          if (root && !seen.has(root)) {
+            seen.add(root);
+            watch(root);
+            [...root.children].forEach(check);
+          }
+        }
+      };
+      const watch = (root) => new MutationObserver((records) => {
+        for (const r of records)
+          r.type === "attributes" ? check(r.target) : r.addedNodes.forEach(check);
+      }).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "data"] });
+      watch(document);
+      check(document.documentElement);
+    }
+  }).catch(() => {});
+}
+chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+  if (claims.has(tabId))
+    void guardForeignFrames(tabId, frameId);
+});
 async function attachFor(lane, tabId) {
   const set = owners.get(tabId);
   if (set?.size) {
@@ -268,8 +316,16 @@ async function attachFor(lane, tabId) {
     return;
   }
   await wake(tabId);
+  await guardForeignFrames(tabId);
+  // A frame the guard just removed can take a moment to be torn down: retry once.
+  const attach = () => chrome.debugger.attach({ tabId }, "1.3").catch(async (err) => {
+    if (!String(err?.message ?? err).includes("different extension"))
+      throw err;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return chrome.debugger.attach({ tabId }, "1.3");
+  });
   try {
-    await chrome.debugger.attach({ tabId }, "1.3");
+    await attach();
   } catch (err) {
     // ponytail: after a service-worker restart owners is empty but Chrome may still
     // hold our attachment; adopt it. Ceiling: also adopts a DevTools/other-extension

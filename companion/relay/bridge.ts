@@ -99,6 +99,10 @@ class TabState {
 	banned = false;
 	/** Chrome's message from the last failed attach, passed on to the agent. */
 	attachError = "";
+	/** The agent's root-session setup calls (`Page.enable`, `Target.setAutoAttach`, ...), replayed after a silent reattach. */
+	readonly setup = new Map<string, Record<string, unknown> | undefined>();
+	/** When the relay last reattached behind the agent's back; a second drop within a second is final. */
+	reattachedAt = 0;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
@@ -159,6 +163,11 @@ const EXT_WAIT_MS = Number(process.env.AMTU_EXT_WAIT_MS || 10_000);
 export const PERMANENT_ATTACH_ERROR = /Cannot access(?! a chrome-extension:\/\/ URL of different extension)|Cannot attach to this target/i;
 /** Another extension (captcha solver, password manager, coupon finder) put a frame in the page; it can go away, so retry. */
 const FOREIGN_EXTENSION_FRAME = /URL of different extension/i;
+/** Root-session calls that set up state the agent relies on; a fresh debugger attach loses them. */
+const SETUP_METHOD = /\.enable$|^Target\.setAutoAttach$|^Page\.setLifecycleEventsEnabled$|^Network\.setExtraHTTPHeaders$|^Emulation\.set/;
+/** Setup calls an agent makes many times (one per script, binding, world): kept per params, not per method. */
+// ponytail: a replayed script gets a new identifier, so removing it by the old one fails quietly.
+const SETUP_MANY = /^Page\.addScriptToEvaluateOnNewDocument$|^Runtime\.addBinding$|^Page\.createIsolatedWorld$/;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
 
@@ -539,6 +548,11 @@ export class RelayBridge {
 				},
 				SLOW_CDP_METHODS.has(msg.method) ? SLOW_RPC_TIMEOUT_MS : RPC_TIMEOUT_MS,
 			);
+			if (tab && !realSessionId) {
+				if (SETUP_METHOD.test(msg.method)) tab.setup.set(msg.method, msg.params);
+				else if (SETUP_MANY.test(msg.method)) tab.setup.set(`${msg.method} ${JSON.stringify(msg.params ?? {})}`, msg.params);
+				else if (msg.method.endsWith(".disable")) tab.setup.delete(msg.method.replace(/disable$/, "enable"));
+			}
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
@@ -845,10 +859,39 @@ export class RelayBridge {
 		tab.attaching = null;
 		// Only the user dismissing the debugging bar means hands off; anything else may attach again.
 		if (reason === "canceled_by_user") tab.banned = true;
+		// Chrome also drops the debugger when another extension's frame lands in the page
+		// (the extension strips those frames in agent tabs): reattach so the agent keeps going.
+		if (reason === "target_closed" && this.#sessionHolders(tabId).length > 0 && Date.now() - tab.reattachedAt > 1000) {
+			tab.reattachedAt = Date.now();
+			void this.#reattach(tab);
+			return;
+		}
 		// The user dismissed the debugger infobar (or the attach was torn
 		// down): release the tab's omp-group membership too.
 		this.#syncTabGrouping(tab);
 		this.#retractTab(tab);
+	}
+
+	/** Reattach after an unasked drop and replay the agent's setup; child frame sessions and execution contexts start over. */
+	async #reattach(tab: TabState): Promise<void> {
+		for (const child of tab.realSessions) {
+			this.#realSessionTabs.delete(child);
+			this.#onCdpEvent(tab.tabId, undefined, "Target.detachedFromTarget", { sessionId: child });
+		}
+		tab.realSessions.clear();
+		if (!this.#tabs.has(tab.tabId) || !(await this.#ensureAttached(tab))) {
+			this.#syncTabGrouping(tab);
+			this.#retractTab(tab);
+			return;
+		}
+		if (tab.setup.has("Runtime.enable")) this.#onCdpEvent(tab.tabId, undefined, "Runtime.executionContextsCleared", {});
+		for (const [key, params] of tab.setup) {
+			const method = key.split(" ")[0];
+			await this.#rpc({ op: "send", tabId: tab.tabId, method, params }).catch(err =>
+				this.#log("replay failed", { tabId: tab.tabId, method, error: err instanceof Error ? err.message : String(err) }),
+			);
+		}
+		this.#log("tab reattached", { tabId: tab.tabId, replayed: tab.setup.size });
 	}
 
 	#onTabRemoved(tabId: number): void {
