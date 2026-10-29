@@ -101,8 +101,10 @@ class TabState {
 	attachError = "";
 	/** The agent's root-session setup calls (`Page.enable`, `Target.setAutoAttach`, ...), replayed after a silent reattach. */
 	readonly setup = new Map<string, Record<string, unknown> | undefined>();
-	/** When the relay last reattached behind the agent's back; a second drop within a second is final. */
-	reattachedAt = 0;
+	/** Times Chrome dropped the debugger in the last 10s; more than 10 and the relay stops reattaching. */
+	drops: number[] = [];
+	/** A reattach in progress; agent commands wait for it instead of failing. */
+	reattaching: Promise<void> | null = null;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
@@ -533,6 +535,7 @@ export class RelayBridge {
 			return;
 		}
 		const tab = this.#tabs.get(tabId);
+		if (tab?.reattaching) await tab.reattaching;
 		if (tab && !(await this.#ensureAttached(tab))) {
 			this.#replyError(conn, msg, this.#attachFailure(tab));
 			return;
@@ -861,10 +864,14 @@ export class RelayBridge {
 		if (reason === "canceled_by_user") tab.banned = true;
 		// Chrome also drops the debugger when another extension's frame lands in the page
 		// (the extension strips those frames in agent tabs): reattach so the agent keeps going.
-		if (reason === "target_closed" && this.#sessionHolders(tabId).length > 0 && Date.now() - tab.reattachedAt > 1000) {
-			tab.reattachedAt = Date.now();
-			void this.#reattach(tab);
-			return;
+		if (reason === "target_closed" && this.#sessionHolders(tabId).length > 0) {
+			const now = Date.now();
+			tab.drops = tab.drops.filter(t => now - t < 10_000).concat(now);
+			if (tab.reattaching) return; // the running reattach sees the drop and goes again
+			if (tab.drops.length <= 10) {
+				tab.reattaching = this.#reattach(tab).finally(() => (tab.reattaching = null));
+				return;
+			}
 		}
 		// The user dismissed the debugger infobar (or the attach was torn
 		// down): release the tab's omp-group membership too.
@@ -874,24 +881,28 @@ export class RelayBridge {
 
 	/** Reattach after an unasked drop and replay the agent's setup; child frame sessions and execution contexts start over. */
 	async #reattach(tab: TabState): Promise<void> {
-		for (const child of tab.realSessions) {
-			this.#realSessionTabs.delete(child);
-			this.#onCdpEvent(tab.tabId, undefined, "Target.detachedFromTarget", { sessionId: child });
+		// A password manager adds its frames in a burst, so a drop can land mid-replay: go again.
+		while (tab.drops.length <= 10) {
+			for (const child of tab.realSessions) {
+				this.#realSessionTabs.delete(child);
+				this.#onCdpEvent(tab.tabId, undefined, "Target.detachedFromTarget", { sessionId: child });
+			}
+			tab.realSessions.clear();
+			if (!this.#tabs.has(tab.tabId) || !(await this.#ensureAttached(tab))) break;
+			if (tab.setup.has("Runtime.enable")) this.#onCdpEvent(tab.tabId, undefined, "Runtime.executionContextsCleared", {});
+			for (const [key, params] of tab.setup) {
+				const method = key.split(" ")[0];
+				await this.#rpc({ op: "send", tabId: tab.tabId, method, params }).catch(() => {});
+			}
+			if (tab.attached) {
+				this.#log("tab reattached", { tabId: tab.tabId, replayed: tab.setup.size, drops: tab.drops.length });
+				return;
+			}
+			await new Promise(resolve => setTimeout(resolve, 200));
 		}
-		tab.realSessions.clear();
-		if (!this.#tabs.has(tab.tabId) || !(await this.#ensureAttached(tab))) {
-			this.#syncTabGrouping(tab);
-			this.#retractTab(tab);
-			return;
-		}
-		if (tab.setup.has("Runtime.enable")) this.#onCdpEvent(tab.tabId, undefined, "Runtime.executionContextsCleared", {});
-		for (const [key, params] of tab.setup) {
-			const method = key.split(" ")[0];
-			await this.#rpc({ op: "send", tabId: tab.tabId, method, params }).catch(err =>
-				this.#log("replay failed", { tabId: tab.tabId, method, error: err instanceof Error ? err.message : String(err) }),
-			);
-		}
-		this.#log("tab reattached", { tabId: tab.tabId, replayed: tab.setup.size });
+		this.#log("reattach gave up", { tabId: tab.tabId, drops: tab.drops.length });
+		this.#syncTabGrouping(tab);
+		this.#retractTab(tab);
 	}
 
 	#onTabRemoved(tabId: number): void {

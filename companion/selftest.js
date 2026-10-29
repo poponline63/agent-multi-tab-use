@@ -247,9 +247,10 @@ try {
 	await send("Page.enable", {}, attached.result?.sessionId);
 	const dropped = fakeTabs.get(cdpPort).at(-1).tabId;
 	hubSend({ t: "lane", port: cdpPort, msg: { t: "detached", tabId: dropped, reason: "target_closed" } });
+	hubSend({ t: "lane", port: cdpPort, msg: { t: "detached", tabId: dropped, reason: "target_closed" } });
 	await new Promise((resolve) => setTimeout(resolve, 300));
 	const after = await send("Runtime.evaluate", { expression: "1" }, attached.result?.sessionId);
-	assert(/says hi/.test(after.result?.result?.value ?? "") && sentMethods.filter((m) => m === "Page.enable").length === 2, `Chrome dropping the debugger (another extension's frame) reattaches, replays Page.enable, same session: ${JSON.stringify(after.result ?? after.error)}`);
+	assert(/says hi/.test(after.result?.result?.value ?? "") && sentMethods.filter((m) => m === "Page.enable").length >= 2, `Chrome dropping the debugger twice in a row (a password manager's frames) reattaches, replays Page.enable, same session: ${JSON.stringify(after.result ?? after.error)}`);
 	await api("/release", { agent: "cdp-test", all: true });
 	claims.clear();
 	const connected = await api("/claim", { agent: "after-cdp" });

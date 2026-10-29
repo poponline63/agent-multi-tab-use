@@ -262,10 +262,13 @@ async function wake(tabId) {
     await new Promise((resolve) => setTimeout(resolve, 200));
 }
 // Chrome refuses (and drops) a debugger on any page holding another extension's frame:
-// Bitwarden's autofill menu, captcha solvers, coupon finders. In agent tabs only, remove
-// such frames the moment they're inserted, before they load; the user's tabs are untouched.
+// Bitwarden's autofill menu, coupon finders. In agent tabs only, mark form fields with the
+// password managers' "skip this field" attributes so their menus never open (Bitwarden
+// honors data-bwignore once "Allow websites to exclude fields to autofill" is on), and
+// remove any such frame that still gets inserted. The user's tabs are untouched.
 // ponytail: re-injected per navigation, so a frame an extension adds at document_start
 // can win the race; and a shadow root attached after its host is in the page is missed.
+// Removing a frame races Chrome's own check, so the relay reattaches after a drop anyway.
 function guardForeignFrames(tabId, frameId) {
   return chrome.scripting.executeScript({
     target: frameId === undefined ? { tabId, allFrames: true } : { tabId, frameIds: [frameId] },
@@ -287,6 +290,11 @@ function guardForeignFrames(tabId, frameId) {
           if (foreign(el)) {
             el.remove();
             continue;
+          }
+          if (/^(INPUT|TEXTAREA|SELECT|FORM)$/.test(el.tagName)) {
+            el.setAttribute("data-bwignore", "");
+            el.setAttribute("data-lpignore", "true");
+            el.setAttribute("data-1p-ignore", "");
           }
           const root = chrome.dom.openOrClosedShadowRoot(el);
           if (root && !seen.has(root)) {
