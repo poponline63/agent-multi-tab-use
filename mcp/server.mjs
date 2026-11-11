@@ -112,7 +112,8 @@ async function cdp(method, params = {}, sessionId, timeoutMs = 30_000) {
 
 async function myTabs() {
 	const { cdpUrl } = await claim();
-	return (await fetch(`${cdpUrl}/json/list`).then((r) => r.json())).filter((t) => t.type === "page");
+	// With "Let agents see my own tabs" on, /json/list also has the user's tabs: list only ours.
+	return (await fetch(`${cdpUrl}/json/list`).then((r) => r.json())).filter((t) => t.type === "page" && t.owned !== false);
 }
 
 async function session(tab) {

@@ -187,6 +187,12 @@ try {
 	await Bun.sleep(100);
 	const listed = async () => (await fetch("http://127.0.0.1:9725/json/list").then((r) => r.json())).map((t) => t.url);
 	assert((await listed()).includes("https://x.com/i/history"), "the agent's tab is listed on its port while it holds the lease");
+	hubSend({ t: "lane", port: 9725, msg: { t: "tabCreated", tab: { tabId: 504, url: "https://mail.example/inbox", title: "Inbox", active: true, windowId: 1, pinned: false, groupId: -1 } } });
+	await Bun.sleep(100);
+	const flags = Object.fromEntries((await fetch("http://127.0.0.1:9725/json/list").then((r) => r.json())).map((t) => [t.url, t.owned]));
+	assert(flags["https://x.com/i/history"] === true && flags["https://mail.example/inbox"] === false, `/json/list marks the agent's own tabs (owned:true) apart from the user's shared tabs: ${JSON.stringify(flags)}`);
+	hubSend({ t: "lane", port: 9725, msg: { t: "tabRemoved", tabId: 504 } });
+	await Bun.sleep(50);
 	const tidy = await api("/release", { agent: "codex", port: 9725 });
 	assert(tidy.closedTabs === 1 && removedTabs.join() === "501", "release closes the agent's unseen tab, keeps the one the user looked at and the adopted one");
 	await Bun.sleep(100);

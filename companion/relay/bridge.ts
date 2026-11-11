@@ -280,8 +280,8 @@ export class RelayBridge {
 	}
 
 	/** Payload for `GET /json/list` (debugging aid; per-target endpoints are not served). */
-	listTargets(wsBase?: string): Array<Record<string, string | number>> {
-		const out: Array<Record<string, string | number>> = [];
+	listTargets(wsBase?: string): Array<Record<string, string | number | boolean>> {
+		const out: Array<Record<string, string | number | boolean>> = [];
 		for (const tab of this.#tabs.values()) {
 			if (!this.#eligible(tab)) continue;
 			out.push({
@@ -291,6 +291,8 @@ export class RelayBridge {
 				url: tab.url,
 				windowId: tab.windowId,
 				groupId: tab.groupId,
+				// true for this port's own tabs; false for the user's tabs it can see because sharing is on.
+				owned: this.#claimed(tab.tabId),
 				...(wsBase ? { webSocketDebuggerUrl: wsBase } : {}),
 			});
 		}
