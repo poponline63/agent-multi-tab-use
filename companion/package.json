@@ -1,6 +1,6 @@
 ﻿{
 	"name": "agent-multi-tab-use-companion",
-	"version": "1.6.8",
+	"version": "1.6.10",
 	"private": true,
 	"license": "MIT",
 	"scripts": {

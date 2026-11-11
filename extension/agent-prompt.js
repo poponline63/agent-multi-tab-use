@@ -54,6 +54,15 @@ WHAT YOU CAN SEE
   (bringToFront / activateTarget do nothing). If a page acts differently when unfocused, send
   Emulation.setFocusEmulationEnabled {"enabled": true} on your tab (Puppeteer and Playwright already do).
 
+CAPTCHAS AND OTHER EXTENSIONS
+  The user's own extensions keep running in your tabs. If a page shows a captcha (reCAPTCHA, hCaptcha,
+  Cloudflare Turnstile, "Just a moment..."), don't click or solve it: a captcha-solver extension (or the user)
+  handles it. Every 2 seconds, for up to 2 minutes, check whether one of these fields has a value:
+    [name="g-recaptcha-response"], [name="h-captcha-response"], [name="cf-turnstile-response"]
+  or the challenge is gone (a solved Cloudflare check reloads the page). Then carry on. Still unsolved: tell the user.
+  Password-manager and coupon pop-up menus are kept out of your tabs. If one command fails with
+  "Detached while handling command", send it again: the hub reconnects your session by itself.
+
 OTHER ENDPOINTS (GET ${HUB}/ lists them all)
   GET  /status   every port: its group, which agent holds it, "live", tab count; plus "chromeConnected"
   POST /group    {"name":"...","color":"yellow"}  set a tab group's color
