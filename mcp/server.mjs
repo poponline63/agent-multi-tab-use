@@ -130,6 +130,14 @@ async function session(tab) {
 	return sessions.get(targetId);
 }
 
+// "none", "waiting" (a challenge or empty token is on the page) or "solved" (a token is filled in).
+const CAPTCHA_STATE = `(() => {
+	const tokens = [...document.querySelectorAll('[name="g-recaptcha-response"],[name="h-captcha-response"],[name="cf-turnstile-response"]')];
+	const challenge = document.querySelector('iframe[src*="/recaptcha/"],iframe[src*="hcaptcha.com"],iframe[src*="challenges.cloudflare.com"]') || /^Just a moment/.test(document.title);
+	if (tokens.some((t) => t.value)) return "solved";
+	return tokens.length || challenge ? "waiting" : "none";
+})()`;
+
 async function evaluate(sid, expression) {
 	const r = await cdp("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, sid);
 	if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
@@ -296,6 +304,27 @@ const TOOLS = {
 		description: "Run JavaScript in the page and return the JSON result (await is allowed). For anything the other tools don't cover.",
 		inputSchema: { type: "object", properties: { js: { type: "string", description: "An expression, e.g. document.querySelectorAll('h2').length" }, ...tabArg }, required: ["js"] },
 		run: async ({ js, tab }) => JSON.stringify(await evaluate(await session(tab), js), null, 1) ?? "undefined",
+	},
+	browser_wait_captcha: {
+		description: "Use when a page shows a captcha (reCAPTCHA, hCaptcha, Cloudflare Turnstile or a 'checking your browser' page). Don't click or solve it yourself: this waits for the user's captcha-solver extension (or the user) to finish, then you carry on. Returns solved, gone, no captcha, or still unsolved after the timeout.",
+		inputSchema: { type: "object", properties: { timeoutSec: { type: "integer", description: "How long to wait, default 120" }, ...tabArg } },
+		run: async ({ tab, timeoutSec = 120 }) => {
+			const sid = await session(tab);
+			const deadline = Date.now() + timeoutSec * 1000;
+			let seen = false;
+			let state = "none";
+			while (Date.now() < deadline) {
+				// The page navigating away (a solved Cloudflare check reloads it) throws here; just look again.
+				state = await evaluate(sid, CAPTCHA_STATE).catch(() => "loading");
+				if (state === "solved" || (state === "none" && seen)) break;
+				if (state === "none") return "no captcha on this page";
+				seen ||= state === "waiting";
+				await sleep(2000);
+			}
+			const [title, url] = await evaluate(sid, "[document.title, location.href]").catch(() => ["", ""]);
+			const outcome = state === "solved" ? "captcha solved" : state === "none" ? "captcha gone (solved, page moved on)" : `still unsolved after ${timeoutSec}s: tell the user`;
+			return `${outcome}. title: ${title}\nurl: ${url}`;
+		},
 	},
 	browser_tabs: {
 		description: "List your tabs (only tabs you opened, plus popups they opened). * marks the current one.",

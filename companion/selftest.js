@@ -9,6 +9,7 @@ const SCAN_FROM = LEASE ? 9824 : 9724;
 const FOREIGN = 9729;
 const store = { ports: LEASE ? [9824] : [9724, 9725, 9726], leases: {}, groupColors: {} };
 const removedTabs = [];
+const sentMethods = [];
 // A stand-in for Chrome behind the extension: tabs per port, answers attach/send/createTab.
 const fakeTabs = new Map();
 let nextTab = 100;
@@ -24,6 +25,7 @@ function fakeExtension(port, msg) {
 		fakeTabs.set(port, [...(fakeTabs.get(port) ?? []), tab]);
 		return reply({ tab });
 	}
+	if (msg.op === "send") sentMethods.push(msg.method);
 	if (msg.op === "send" && msg.method === "Runtime.evaluate") return reply({ result: { type: "string", value: `tab ${msg.tabId} says hi` } });
 	if (msg.op === "group") return reply({ grouped: {} });
 	reply({});
@@ -258,6 +260,13 @@ try {
 	globalThis.hub.ws.close();
 	const during = await send("Runtime.evaluate", { expression: "1" }, attached.result?.sessionId);
 	assert(/says hi/.test(during.result?.result?.value ?? ""), `a command sent while the extension reconnects waits and succeeds, same session: ${JSON.stringify(during.result ?? during.error)}`);
+	await send("Page.enable", {}, attached.result?.sessionId);
+	const dropped = fakeTabs.get(cdpPort).at(-1).tabId;
+	hubSend({ t: "lane", port: cdpPort, msg: { t: "detached", tabId: dropped, reason: "target_closed" } });
+	hubSend({ t: "lane", port: cdpPort, msg: { t: "detached", tabId: dropped, reason: "target_closed" } });
+	await new Promise((resolve) => setTimeout(resolve, 300));
+	const after = await send("Runtime.evaluate", { expression: "1" }, attached.result?.sessionId);
+	assert(/says hi/.test(after.result?.result?.value ?? "") && sentMethods.filter((m) => m === "Page.enable").length >= 2, `Chrome dropping the debugger twice in a row (a password manager's frames) reattaches, replays Page.enable, same session: ${JSON.stringify(after.result ?? after.error)}`);
 	await api("/release", { agent: "cdp-test", all: true });
 	claims.clear();
 	const connected = await api("/claim", { agent: "after-cdp" });
@@ -279,6 +288,9 @@ try {
 	const anon = await api("/release", { port: held });
 	assert(/held by holder; send "agent"/.test(anon.error ?? ""), "release without the holder's agent name is refused");
 	await api("/release", { port: held, agent: "holder" });
+
+	const { PERMANENT_ATTACH_ERROR } = await import("./relay/bridge.ts");
+	assert(PERMANENT_ATTACH_ERROR.test("Cannot access a chrome:// URL") && !PERMANENT_ATTACH_ERROR.test("Cannot access a chrome-extension:// URL of different extension"), "another extension's frame in a page doesn't ban the tab; chrome:// pages still do");
 
 	// ---- idle leases go back to the pool (separate hub with a short idle time) ----
 	const lease = Bun.spawnSync([process.execPath, import.meta.path, "--lease"], { stdout: "inherit", stderr: "inherit" });

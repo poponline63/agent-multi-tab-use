@@ -99,11 +99,11 @@ class TabState {
 	banned = false;
 	/** Chrome's message from the last failed attach, passed on to the agent. */
 	attachError = "";
-	/** CDP setup commands (X.enable, setAutoAttach, ...) an agent sent on the root session, replayed after a reattach. */
-	readonly setup = new Map<string, unknown>();
-	/** Times Chrome dropped the debugger in the last 10s; a reattach loop stops after 10. */
+	/** The agent's root-session setup calls (`Page.enable`, `Target.setAutoAttach`, ...), replayed after a silent reattach. */
+	readonly setup = new Map<string, Record<string, unknown> | undefined>();
+	/** Times Chrome dropped the debugger in the last 10s; more than 10 and the relay stops reattaching. */
 	drops: number[] = [];
-	/** In-flight reattach after Chrome dropped the debugger; commands wait for it. */
+	/** A reattach in progress; agent commands wait for it instead of failing. */
 	reattaching: Promise<void> | null = null;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
@@ -162,12 +162,13 @@ const SLOW_RPC_TIMEOUT_MS = Number(process.env.AMTU_SLOW_RPC_MS || 120_000);
 /** How long a command waits for the extension to (re)connect before failing; a service-worker restart takes ~1s. */
 const EXT_WAIT_MS = Number(process.env.AMTU_EXT_WAIT_MS || 10_000);
 /** Attach errors that won't go away by retrying (the page itself can't be debugged). */
-// A foreign extension's frame (password manager, coupon finder) blocks the debugger only while it is in the page.
-const PERMANENT_ATTACH_ERROR = /Cannot access(?! a chrome-extension:\/\/ URL of different extension)|Cannot attach to this target/i;
+export const PERMANENT_ATTACH_ERROR = /Cannot access(?! a chrome-extension:\/\/ URL of different extension)|Cannot attach to this target/i;
+/** Another extension (captcha solver, password manager, coupon finder) put a frame in the page; it can go away, so retry. */
 const FOREIGN_EXTENSION_FRAME = /URL of different extension/i;
-/** Root-session commands that set up a debugging session; replayed on the new session after Chrome drops one. */
+/** Root-session calls that set up state the agent relies on; a fresh debugger attach loses them. */
 const SETUP_METHOD = /\.enable$|^Target\.setAutoAttach$|^Page\.setLifecycleEventsEnabled$|^Network\.setExtraHTTPHeaders$|^Emulation\.set/;
-/** Setup commands that stack (each call adds one), kept per distinct params. */
+/** Setup calls an agent makes many times (one per script, binding, world): kept per params, not per method. */
+// ponytail: a replayed script gets a new identifier, so removing it by the old one fails quietly.
 const SETUP_MANY = /^Page\.addScriptToEvaluateOnNewDocument$|^Runtime\.addBinding$|^Page\.createIsolatedWorld$/;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
@@ -861,17 +862,14 @@ export class RelayBridge {
 		tab.attaching = null;
 		// Only the user dismissing the debugging bar means hands off; anything else may attach again.
 		if (reason === "canceled_by_user") tab.banned = true;
-		// Chrome drops the debugger when another extension's frame lands in the page or the
-		// renderer swaps; while an agent still holds a session, reattach and replay its setup
-		// instead of failing every later command. More than 10 drops in 10s: give up.
+		// Chrome also drops the debugger when another extension's frame lands in the page
+		// (the extension strips those frames in agent tabs): reattach so the agent keeps going.
 		if (reason === "target_closed" && this.#sessionHolders(tabId).length > 0) {
 			const now = Date.now();
 			tab.drops = tab.drops.filter(t => now - t < 10_000).concat(now);
-			if (tab.reattaching) return;
+			if (tab.reattaching) return; // the running reattach sees the drop and goes again
 			if (tab.drops.length <= 10) {
-				tab.reattaching = this.#reattach(tab).finally(() => {
-					tab.reattaching = null;
-				});
+				tab.reattaching = this.#reattach(tab).finally(() => (tab.reattaching = null));
 				return;
 			}
 		}
@@ -881,7 +879,9 @@ export class RelayBridge {
 		this.#retractTab(tab);
 	}
 
+	/** Reattach after an unasked drop and replay the agent's setup; child frame sessions and execution contexts start over. */
 	async #reattach(tab: TabState): Promise<void> {
+		// A password manager adds its frames in a burst, so a drop can land mid-replay: go again.
 		while (tab.drops.length <= 10) {
 			for (const child of tab.realSessions) {
 				this.#realSessionTabs.delete(child);
