@@ -329,8 +329,15 @@ function isAgentGroupTitle(title) {
   const base = t.split(SUB_SEPARATOR)[0].toLowerCase();
   return Object.keys(settings.groupColors ?? {}).some((n) => n.toLowerCase() === t.toLowerCase() || n.toLowerCase() === base) || Object.values(settings.leases ?? {}).some((l) => l?.group?.toLowerCase() === t.toLowerCase());
 }
+// Chrome (126+) saves every tab group: closing a group's last tab leaves a saved-group
+// chip in the tab strip / bookmarks bar for good, and extensions can't delete those.
+// Ungrouping first lets the group empty out and disappear instead, so agents leave no chips.
+async function ungroupThenClose(id) {
+  await withTimeout(chrome.tabs.ungroup(id), 3000, "ungrouping a tab").catch(() => {});
+  await withTimeout(chrome.tabs.remove(id), 5000, "closing a tab");
+}
 function closeTab(id) {
-  return withTimeout(chrome.tabs.remove(id), 5000, "closing a tab").then(() => 1, () => 0);
+  return ungroupThenClose(id).then(() => 1, () => 0);
 }
 
 // Two-step confirmation for anything that reduces the user's privacy: the first
