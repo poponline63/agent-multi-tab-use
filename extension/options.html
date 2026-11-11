@@ -5,85 +5,61 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>Agent Multi Tab Use</title>
 		<link rel="icon" href="icons/icon32.png" />
-		<link rel="stylesheet" href="options.css" />
+		<link rel="stylesheet" href="dashboard.css" />
 	</head>
 	<body>
 		<main>
-			<header class="top">
+			<header>
 				<img src="icons/icon128.png" alt="" />
-				<div class="brand">
-					<h1>Agent Multi Tab Use</h1>
-					<p>Every agent gets its own port and its own tab group in your Chrome.</p>
-				</div>
-				<div class="pulse" aria-live="polite">
-					<span id="hub" class="off"><b>Hub</b> offline</span>
-					<span class="on"><b id="live">0</b> live</span>
-					<span><b id="total">0</b> agents</span>
-					<span><b id="claimed">0</b> tabs</span>
-				</div>
+				<h1>Agent Multi Tab Use</h1>
+				<span id="status" class="pill off" aria-live="polite"><i></i><span>Checking…</span></span>
 			</header>
 
-			<a class="banner" id="appBanner" href="#appCard" hidden>
-				<b>Companion app not running.</b> Agents can't connect until it runs. Install or open it &rarr;
-			</a>
+			<div class="banner" id="appBanner" hidden>
+				<span>The companion app isn't running, so agents can't connect.</span>
+				<a class="btn" id="download" target="_blank" rel="noopener">Get the app</a>
+			</div>
 
-			<section>
-				<div class="head">
-					<h2>Active agents</h2>
-					<p>Each agent gets its own port and tab group. Agents idle for 60 minutes are released automatically.</p>
+			<div class="stats">
+				<div><b id="total">0</b><span>agents</span></div>
+				<div><b id="claimed">0</b><span>tabs</span></div>
+				<div><b id="free">0</b><span>free ports</span></div>
+			</div>
+
+			<section class="card">
+				<div class="card-head">
+					<h2>Agents</h2>
+					<button class="btn ghost" id="cleanup" type="button" title="Close tabs agents left behind (never ones you looked at) and remove their tab groups">Clean up groups</button>
 				</div>
-				<div class="agents" id="agents"></div>
-			</section>
-			<section>
-				<div class="head">
-					<h2>Agent setup</h2>
-					<p>Copy and paste this into your agent so it starts on the right port.</p>
-				</div>
-				<div class="card">
-					<div class="cmd">
-						<input id="promptGroup" class="group-input" value="Agents" spellcheck="false" aria-label="Tab group name for this agent" />
-						<button class="btn primary" id="copyPrompt" type="button">Copy for agent</button>
-					</div>
-					<details class="reveal">
-						<summary>Show what gets copied</summary>
-						<pre class="prompt" id="prompt"></pre>
-					</details>
-				</div>
+				<div id="agents" class="agents"></div>
 			</section>
 
-			<section>
-				<div class="head">
-					<h2>Companion app</h2>
-					<p>Agents connect to the free companion app, which passes their commands to this extension.</p>
-				</div>
-				<div class="card app-card" id="appCard">
-					<div class="app-row">
-						<span class="app-dot"></span>
-						<div class="app-text">
-							<b id="appTitle">Checking for the companion app…</b>
-							<span id="appSub"></span>
-						</div>
-						<a class="btn primary" id="download" target="_blank" rel="noopener">Download for Windows</a>
-					</div>
-					<label class="switch">
-						<input type="checkbox" id="shareTabs" />
-						<span class="track"></span>
-						<span class="switch-text">
-							<b>Let agents see my own tabs</b>
-							<span>Off (recommended): agents only see tabs they opened. On: they can also see and use tabs you opened, like your email. Agents never see each other's tabs either way.</span>
-						</span>
-					</label>
-					<p class="hint">
-						When an agent is done, or idle for 60 minutes, the tabs it opened close, except ones you've looked at, which
-						stay open for you.
-					</p>
-					<p class="hint">
-						Everything stays on this PC: the app only listens on 127.0.0.1 and sends nothing online. Any program on this PC
-						can reach it, so run <code>AgentMultiTabUse.exe --quit</code> when you don't want agents in your browser. Turn
-						off any other relay extension first.
-					</p>
-				</div>
+			<section class="card">
+				<label class="toggle">
+					<span>
+						<b>Let agents see my own tabs</b>
+						<small>Agents can use tabs you opened. They never see each other's.</small>
+					</span>
+					<input type="checkbox" id="shareTabs" />
+					<i aria-hidden="true"></i>
+				</label>
 			</section>
+
+			<section class="card">
+				<div class="card-head">
+					<h2>Connect an agent</h2>
+				</div>
+				<div class="copy">
+					<input id="promptGroup" value="Agents" spellcheck="false" aria-label="Tab group name" placeholder="Tab group name" />
+					<button class="btn primary" id="copyPrompt" type="button">Copy instructions</button>
+				</div>
+				<details>
+					<summary>Preview</summary>
+					<pre id="prompt"></pre>
+				</details>
+			</section>
+
+			<footer id="foot">Runs only on this PC (127.0.0.1). Idle agents are released after 15 minutes.</footer>
 		</main>
 		<div class="toast" id="toast" role="status"></div>
 		<script src="config.js"></script>

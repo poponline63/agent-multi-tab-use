@@ -15,7 +15,17 @@ var POOL_FLOOR = 10;
 var POOL_SPARE = 3;
 // Sub groups: Chrome can't nest tab groups, so a sub group is its own group titled "Parent › Name".
 var SUB_SEPARATOR = " › ";
+var OP_TIMEOUT_MS = 9000;
 
+// Chrome APIs that can wait on the user (a "Leave site?" prompt holds tabs.remove) must
+// never hold up everything queued behind them.
+function withTimeout(promise, ms, what) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms / 1000}s`)), ms))
+  ]).finally(() => clearTimeout(timer));
+}
 function hubSend(msg) {
   if (hub.ws?.readyState === WebSocket.OPEN)
     hub.ws.send(JSON.stringify(msg));
@@ -57,7 +67,14 @@ function groupTitle(s, group, parent, color) {
 }
 function nextPort(s, avoid) {
   let port = Math.max(9223, ...s.ports) + 1;
-  while (avoid.includes(port) || s.ports.includes(port))
+  // Fill gaps first so port numbers stay low and familiar (9224, 9225, ...).
+  for (let p = s.ports.length ? Math.min(...s.ports) : 9224; p < port; p++) {
+    if (!avoid.includes(p) && !s.ports.includes(p) && validPort(p)) {
+      port = p;
+      break;
+    }
+  }
+  while (avoid.includes(port) || s.ports.includes(port) || !validPort(port))
     port++;
   if (port > 65535 || s.ports.length >= MAX_PORTS)
     throw new Error(`port limit (${MAX_PORTS}) reached`);
@@ -115,6 +132,12 @@ var hubOps = {
     const s = await readAll();
     trimPool(s);
     agent = String(agent).slice(0, 60);
+    // The same agent claiming again (a new session, a retry) without a group keeps its own group.
+    if (!group && !parent) {
+      const mine = Object.values(s.leases).find((l) => l?.agent === agent && l.group);
+      if (mine)
+        group = mine.group;
+    }
     const n = Math.max(1, Math.min(Math.floor(Number(count)) || 1, MAX_PORTS));
     const title = group || parent ? groupTitle(s, group || parent, group ? parent : null, color) : null;
     const owned = ownedPorts();
@@ -124,7 +147,7 @@ var hubOps = {
     if (port !== undefined) {
       const want = Number(port);
       if (!validPort(want) || want === 9223 || avoid.includes(want))
-        throw new Error(`port ${port} can't be used (invalid, the hub's own port, or used by another app)`);
+        throw new Error(`port ${port} can't be used (invalid, reserved for Chrome's own debugging, the hub's own port, or used by another app); claim without "port" to get a free one`);
       if (s.leases[want] && s.leases[want].agent !== agent)
         throw new Error(`port ${want} is held by ${s.leases[want].agent}`);
       if (!s.leases[want] && inUse(want) && lastHolder.get(want) !== agent)
@@ -177,7 +200,7 @@ var hubOps = {
       ? []
       : [...claims].filter(([tabId, owner]) => list.includes(owner) && createdTabs.get(tabId) === owner && (closeTabs === true || !seenTabs.has(tabId))).map(([tabId]) => tabId);
     // One at a time: chrome.tabs.remove([...]) closes nothing if any id is already gone.
-    const closedTabs = (await Promise.all(closing.map((id) => chrome.tabs.remove(id).then(() => 1, () => 0)))).reduce((a, b) => a + b, 0);
+    const closedTabs = (await Promise.all(closing.map((id) => closeTab(id)))).reduce((a, b) => a + b, 0);
     // Tabs left open go back to the user; still claimed, they'd show up for the port's next agent.
     for (const p of list)
       await releasePortTabs(p);
@@ -207,6 +230,65 @@ var hubOps = {
     await chrome.storage.local.set({ shareTabs: true });
     return { shareTabs: true, message: "Done: agents can now see your own tabs. Turn it off anytime with shareTabs:false or in the extension." };
   },
+  // Every Chrome tab group, with which tabs agents opened (and whether the user has looked at them).
+  async groups() {
+    const [groups, tabs] = await Promise.all([chrome.tabGroups.query({}), chrome.tabs.query({})]);
+    return {
+      groups: groups.map((g) => {
+        const mine = tabs.filter((t) => t.groupId === g.id);
+        return {
+          id: g.id,
+          title: g.title ?? "",
+          color: g.color,
+          windowId: g.windowId,
+          agentGroup: isAgentGroupTitle(g.title),
+          tabs: mine.map((t) => ({ tabId: t.id, title: t.title ?? "", url: t.url ?? t.pendingUrl ?? "", agentOpened: createdTabs.has(t.id), seen: seenTabs.has(t.id) || t.active === true, port: claims.get(t.id) ?? null }))
+        };
+      })
+    };
+  },
+  // Removes leftover agent tab groups. Tabs an agent opened that the user never looked at
+  // close; every other tab (the user's, or one they looked at) is only ungrouped.
+  async cleanupGroups({ titles = [], dryRun = false, includeActiveAgents = false } = {}) {
+    const extra = (Array.isArray(titles) ? titles : [titles]).map((t) => String(t).trim().toLowerCase()).filter(Boolean);
+    const s = await readAll();
+    const { groups } = await hubOps.groups();
+    const before = groups.length;
+    const activePorts = new Set(Object.keys(s.leases).map(Number));
+    const removed = [];
+    const releasedPorts = new Set();
+    let closedTabs = 0;
+    let ungroupedTabs = 0;
+    for (const g of groups) {
+      const title = g.title.trim();
+      if (!(isAgentGroupTitle(title) || extra.includes(title.toLowerCase())))
+        continue;
+      // A group an agent is using right now stays, unless asked.
+      const busy = g.tabs.some((t) => t.port !== null && activePorts.has(t.port));
+      if (busy && !includeActiveAgents)
+        continue;
+      const close = g.tabs.filter((t) => t.agentOpened && !t.seen).map((t) => t.tabId);
+      const keep = g.tabs.filter((t) => !close.includes(t.tabId)).map((t) => t.tabId);
+      removed.push({ title, windowId: g.windowId, close: close.length, ungroup: keep.length });
+      if (dryRun)
+        continue;
+      for (const t of g.tabs)
+        if (t.port !== null)
+          releasedPorts.add(t.port);
+      if (keep.length)
+        await withTimeout(chrome.tabs.ungroup(keep), 5000, "ungrouping").then(() => ungroupedTabs += keep.length, () => {});
+      for (const id of close)
+        closedTabs += await closeTab(id);
+    }
+    if (!dryRun) {
+      for (const port of releasedPorts) {
+        if (!s.leases[port] || includeActiveAgents)
+          await releasePortTabs(port);
+      }
+    }
+    const after = dryRun ? before : (await chrome.tabGroups.query({})).length;
+    return { dryRun, groupsBefore: before, groupsAfter: after, removed, closedTabs, ungroupedTabs, releasedPorts: [...releasedPorts] };
+  },
   async group({ name, parent, color } = {}) {
     const s = await readAll();
     const title = groupTitle(s, name, parent, color);
@@ -235,6 +317,28 @@ var hubOps = {
     return { added };
   }
 };
+
+// Titles agents' tab groups get: claimed group names (and their sub groups), the
+// default "Agents", and "Port <n>" from versions before 1.7.
+function isAgentGroupTitle(title) {
+  const t = String(title ?? "").trim();
+  if (!t)
+    return false;
+  if (/^port \d+$/i.test(t) || t.toLowerCase() === DEFAULT_GROUP.toLowerCase())
+    return true;
+  const base = t.split(SUB_SEPARATOR)[0].toLowerCase();
+  return Object.keys(settings.groupColors ?? {}).some((n) => n.toLowerCase() === t.toLowerCase() || n.toLowerCase() === base) || Object.values(settings.leases ?? {}).some((l) => l?.group?.toLowerCase() === t.toLowerCase());
+}
+// Chrome (126+) saves every tab group: closing a group's last tab leaves a saved-group
+// chip in the tab strip / bookmarks bar for good, and extensions can't delete those.
+// Ungrouping first lets the group empty out and disappear instead, so agents leave no chips.
+async function ungroupThenClose(id) {
+  await withTimeout(Promise.resolve().then(() => chrome.tabs.ungroup(id)), 3000, "ungrouping a tab").catch(() => {});
+  await withTimeout(chrome.tabs.remove(id), 5000, "closing a tab");
+}
+function closeTab(id) {
+  return ungroupThenClose(id).then(() => 1, () => 0);
+}
 
 // Two-step confirmation for anything that reduces the user's privacy: the first
 // call returns a token; the agent must show the user the message and only repeat
@@ -291,14 +395,20 @@ function connectHub() {
       return;
     }
     const op = hubOps[msg.op];
+    // Ops run one at a time, and one that hangs (Chrome waiting on a dialog) gives up after
+    // OP_TIMEOUT_MS so the queue moves on. In 1.6 a single stuck release left every later
+    // claim, status and idle sweep unanswered until Chrome restarted.
     hubQueue = hubQueue.then(async () => {
+      const started = Date.now();
       try {
         if (!op)
           throw new Error(`unknown op ${msg.op}`);
-        hubSend({ id: msg.id, ok: true, result: await op(msg.args) });
+        hubSend({ id: msg.id, ok: true, result: await withTimeout(op(msg.args), OP_TIMEOUT_MS, msg.op) });
       } catch (err) {
         hubSend({ id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
       }
+      if (Date.now() - started > 3000)
+        hubSend({ t: "log", message: `slow op ${msg.op}`, data: { ms: Date.now() - started } });
     });
   };
   socket.onclose = () => {
