@@ -9,25 +9,36 @@
 // 5. Logs to %LOCALAPPDATA%\Agent Multi Tab Use\hub.log.
 // Build: bun run build   ->   dist/AgentMultiTabUse.exe (no console window)
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
-import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { createConnection, createServer } from "node:net";
+import { homedir, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { isLocalHost, isLocalOrigin, startRelayServer } from "./relay/server.ts";
 import trayExe from "./tray/tray.exe" with { type: "file" };
 
-const VERSION = "1.6.8";
+const VERSION = "1.7.0";
 const HUB_PORT = Number(process.env.AMTU_HUB_PORT || 9223);
 const SCAN_FROM = Number(process.env.AMTU_SCAN_FROM || 9224);
 const SCAN_COUNT = 300;
 const SCAN_CACHE_MS = 60_000;
+// Ports never handed out or listened on: Chrome's usual remote-debugging ports (the
+// user's own Chrome may use one) and Node's inspector. A relay sitting on one of them
+// would also stop that program from starting its own listener.
+const RESERVED_PORTS = String(process.env.AMTU_RESERVED_PORTS ?? "9222,9226,9229")
+	.split(",")
+	.map(Number)
+	.filter((p) => Number.isInteger(p) && p > 0);
 const RUN_RELAYS = process.env.AMTU_NO_RELAYS !== "1";
 const RPC_TIMEOUT_MS = 10000;
 const READY_TIMEOUT_MS = Number(process.env.AMTU_READY_MS || 20000);
 // A claimed port nobody has used for this long is released for its agent (agents
 // often finish without releasing): tidied like a normal release, back in the pool.
-const LEASE_IDLE_MS = Number(process.env.AMTU_LEASE_IDLE_MS || 60 * 60 * 1000);
-const EXPIRY_CHECK_MS = 5 * 60 * 1000;
+// An agent's session ends when it stops sending commands: after this long its tabs close
+// (except ones the user looked at) and its tab group goes away.
+const LEASE_IDLE_MS = Number(process.env.AMTU_LEASE_IDLE_MS || 15 * 60 * 1000);
+// Tabs on a port nobody claimed (an agent that dialed a port number directly) are tidied sooner.
+const UNLEASED_IDLE_MS = Number(process.env.AMTU_UNLEASED_IDLE_MS || 5 * 60 * 1000);
+const EXPIRY_CHECK_MS = Number(process.env.AMTU_EXPIRY_CHECK_MS || 60 * 1000);
 const IS_EXE = basename(process.execPath).toLowerCase() === "agentmultitabuse.exe";
 const HUB = `http://127.0.0.1:${HUB_PORT}`;
 const DATA_DIR = join(process.env.LOCALAPPDATA || tmpdir(), "Agent Multi Tab Use");
@@ -112,23 +123,43 @@ function closeLanes() {
 // "relay" = one of ours (answers 426/401 on /ext), "foreign" = another app, "free" = nothing listening.
 // Raw socket on purpose: Bun's fetch() to a real Chrome's debug port (e.g. an
 // agent's private Chrome) crashes the process a few seconds later (Bun 1.3.14).
+// Windows takes ~2s to refuse a connection to a closed localhost port, so a connect
+// that times out says nothing: only a port we can't bind ourselves counts as taken.
+// (1.6.x read every timeout as "another app", so after a restart all 300 scanned
+// ports, our own included, were avoided and claims got brand-new ports each time.)
 function portKind(port) {
 	if (relays.has(port)) return Promise.resolve("relay");
+	if (RESERVED_PORTS.includes(port)) return Promise.resolve("foreign");
 	return new Promise((resolve) => {
 		const socket = createConnection({ host: "127.0.0.1", port });
 		let connected = false;
+		let settled = false;
 		const done = (kind) => {
+			if (settled) return;
+			settled = true;
 			socket.destroy();
-			resolve(kind);
+			if (kind !== "unknown") return resolve(kind);
+			canBind(port).then((free) => resolve(free ? "free" : "foreign"));
 		};
-		socket.setTimeout(1500, () => done("foreign"));
+		socket.setTimeout(PROBE_MS, () => done(connected ? "foreign" : "unknown"));
 		socket.once("connect", () => {
 			connected = true;
 			socket.write(`GET /ext HTTP/1.0\r\nHost: 127.0.0.1:${port}\r\n\r\n`);
 		});
 		socket.once("data", (chunk) => done(/^HTTP\/1\.[01] (426|401)/.test(String(chunk)) ? "relay" : "foreign"));
-		socket.once("error", () => done(connected ? "foreign" : "free"));
-		socket.once("end", () => done(connected ? "foreign" : "free"));
+		socket.once("error", () => done(connected ? "foreign" : "unknown"));
+		socket.once("end", () => done(connected ? "foreign" : "unknown"));
+	});
+}
+const PROBE_MS = Number(process.env.AMTU_PROBE_MS || 1500);
+
+// True when nothing else holds 127.0.0.1:port (we could listen there ourselves).
+function canBind(port) {
+	return new Promise((resolve) => {
+		const server = createServer();
+		server.unref();
+		server.once("error", () => resolve(false));
+		server.listen({ host: "127.0.0.1", port, exclusive: true }, () => server.close(() => resolve(true)));
 	});
 }
 
@@ -137,18 +168,19 @@ function pushForeign() {
 }
 
 async function scanForeign() {
-	if (Date.now() - scannedAt < SCAN_CACHE_MS) return [...foreign];
+	if (Date.now() - scannedAt < SCAN_CACHE_MS) return [...new Set([...foreign, ...RESERVED_PORTS])];
 	const ports = Array.from({ length: SCAN_COUNT }, (_, i) => SCAN_FROM + i);
 	const kinds = await Promise.all(ports.map(portKind));
 	foreign.clear();
 	ports.forEach((port, i) => kinds[i] === "foreign" && foreign.add(port));
+	for (const port of RESERVED_PORTS) foreign.add(port);
 	scannedAt = Date.now();
 	pushForeign();
 	return [...foreign];
 }
 
 async function ensureRelay(port) {
-	if (!RUN_RELAYS || port === HUB_PORT || relays.has(port)) return;
+	if (!RUN_RELAYS || port === HUB_PORT || relays.has(port) || RESERVED_PORTS.includes(port)) return;
 	const kind = await portKind(port);
 	if (kind === "foreign") {
 		if (!foreign.has(port)) foreign.add(port), pushForeign();
@@ -212,12 +244,18 @@ function idleMs(port) {
 // left behind (unless the user looked at them), so dead agents don't pile up.
 // Ports with tabs but no lease (an agent kept going after its lease expired) are
 // tidied the same way, or they'd never count as free again.
-async function expireLeases() {
-	const idle = (port) => idleMs(port) > LEASE_IDLE_MS;
+let expiring = null;
+function expireLeases() {
+	// One sweep at a time: claims and the timer both call this.
+	expiring ??= sweepIdle().finally(() => (expiring = null));
+	return expiring;
+}
+async function sweepIdle() {
 	const { ports } = await askExt("status");
 	const byAgent = new Map();
 	for (const p of ports) {
-		if (idle(p.port) && (p.agent || p.tabs > 0)) byAgent.set(p.agent, [...(byAgent.get(p.agent) ?? []), p.port]);
+		const idle = idleMs(p.port) > (p.agent ? LEASE_IDLE_MS : UNLEASED_IDLE_MS);
+		if (idle && (p.agent || p.tabs > 0)) byAgent.set(p.agent, [...(byAgent.get(p.agent) ?? []), p.port]);
 	}
 	for (const [agent, list] of byAgent) {
 		// An agent can claim one of these ports between the status read and this release; skip it, keep going.
@@ -270,6 +308,7 @@ async function startTray() {
 	// Detached: Bun.spawn children share a kill-on-close job with this process, and
 	// the tray must outlive a crash to restart the app.
 	spawn(path, [process.execPath, String(process.pid), HUB, LOG_FILE], { detached: true, windowsHide: true, stdio: "ignore" }).unref();
+	removeOldTrays(path);
 }
 
 const HELP = {
@@ -277,19 +316,78 @@ const HELP = {
 	version: VERSION,
 	endpoints: {
 		"GET /status": "all ports, their tab group, which agent holds them, whether they are live, and ports other apps use",
-		"POST /claim": '{"agent":"hermes","group":"Hermes"} -> your own port + CDP URL. "group" is the Chrome tab group your tabs go in (default "Agents"); agents claiming the same group share it. Claiming again with the same agent name returns the same port. Optional: "count" for several ports, "color", "parent":"Hermes" for a sub group titled "Hermes › <group>". Ports idle for 60 minutes are released automatically.',
+		"POST /claim": '{"agent":"hermes","group":"Hermes"} -> your own port + CDP URL. "group" is the Chrome tab group your tabs go in (default "Agents"); agents claiming the same group share it. Claiming again with the same agent name returns the same port. Optional: "count" for several ports, "color", "parent":"Hermes" for a sub group titled "Hermes › <group>". Ports idle for 15 minutes are released automatically (their tabs close, except ones the user looked at).',
 		"POST /release": '{"agent":"hermes","all":true} -> give your ports back when done ("port" or "ports":[...] for specific ones; "agent" must match). Tabs you opened close, except ones the user has looked at, which are handed back open. "keepTabs":true keeps them all, "closeTabs":true closes them all.',
 		"POST /group": '{"name":"Hermes","color":"yellow"} -> set a tab group\'s color',
 		"POST /group/delete": '{"name":"Hermes"} -> forget a group\'s color (and its sub groups\')',
 		"POST /adopt": '{"agent":"hermes","port":9236,"targetId":"4CD57B02A6B1B8D201AB0080C552A9F1"} -> take over a tab the user opened (needs shareTabs on); it moves into your tab group and other agents can no longer see it. Ids come from GET http://127.0.0.1:<port>/json/list. Release gives it back.',
-		"POST /settings": '{"shareTabs":false} -> agents only see tabs they opened (applies at once). {"shareTabs":true} lets agents see the user\'s own tabs: ONLY when the user asks; it returns a confirmation message to show them, then repeat with "confirm":"<token>"',
+		"POST /settings": '{"shareTabs":false} -> agents only see tabs they opened (applies at once). {"shareTabs":true} lets agents see the user\'s own tabs (on by default): turning it back on needs the user\'s confirmation; it returns a message to show them, then repeat with "confirm":"<token>"',
 		"POST /ports": '{"add":5} -> add more ports',
+		"GET /groups": "every Chrome tab group: title, window, its tabs, and which of them agents opened",
+		"POST /groups/cleanup": '{"titles":["Claude"]} -> remove leftover agent tab groups (agent group names, "Agents", "Port <n>", plus any titles given). Tabs an agent opened that the user never looked at close; every other tab is ungrouped and stays open. "dryRun":true only reports.',
+		"GET /agent-guide": "plain-text instructions for agents (same as the extension's Copy for agent)",
 	},
 	colors: ["blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange", "grey"],
+	reservedPorts: RESERVED_PORTS,
+	guide: `${HUB}/agent-guide`,
 };
+
+// Short guide served at /agent-guide and written next to the log, so any agent on the PC can find it.
+const AGENT_GUIDE = `Agent Multi Tab Use: drive the user's real, logged-in Chrome without fighting other agents.
+Always use this for browser work on this PC. Never launch your own Chrome and never use port 9222 or 9226.
+
+1. Claim your own port (same "agent" name = same port and the same tab group back, so retries are safe):
+   POST ${HUB}/claim  {"agent":"<your-fixed-name>","group":"<Your Name>"}
+   -> {"port":9236,"cdpUrl":"http://127.0.0.1:9236","group":"...","ready":true}
+2. Connect any CDP client to cdpUrl (Puppeteer browserURL, Playwright connect_over_cdp, raw ws://127.0.0.1:<port>/cdp).
+   Open your own tabs; they land in your one tab group and stay in the background.
+3. When done: POST ${HUB}/release {"agent":"<your-fixed-name>","all":true}. Your tabs close (ones the user looked at stay open).
+   Ports idle for ${Math.round(LEASE_IDLE_MS / 60000)} minutes are released for you.
+MCP agents: run "node <AMTU>/mcp/server.mjs" with env AMTU_AGENT and AMTU_GROUP for browser_* tools.
+Status: GET ${HUB}/status   Full API: GET ${HUB}/
+`;
+
+// A file any agent (or a setup script) can read to find the hub without being told.
+function writeDiscovery() {
+	const file = process.env.AMTU_DISCOVERY_FILE ?? (IS_EXE ? join(DATA_DIR, "discovery.json") : "");
+	if (!file) return;
+	const mcp = join(DATA_DIR, "mcp", "server.mjs");
+	const info = {
+		name: "Agent Multi Tab Use",
+		version: VERSION,
+		hub: HUB,
+		claim: { method: "POST", url: `${HUB}/claim`, body: { agent: "<your-fixed-name>", group: "<Your Name>" } },
+		release: { method: "POST", url: `${HUB}/release`, body: { agent: "<your-fixed-name>", all: true } },
+		guide: `${HUB}/agent-guide`,
+		mcp: existsSync(mcp) ? { command: "node", args: [mcp], env: { AMTU_AGENT: "<agent>", AMTU_GROUP: "<Group>" } } : null,
+		reservedPorts: RESERVED_PORTS,
+		pid: process.pid,
+	};
+	try {
+		mkdirSync(join(file, ".."), { recursive: true });
+		writeFileSync(file, JSON.stringify(info, null, 2));
+		if (IS_EXE) writeFileSync(join(DATA_DIR, "AGENTS.md"), AGENT_GUIDE);
+	} catch (err) {
+		log("discovery file failed", { error: String(err) });
+	}
+}
+
+// Every app build unpacks its tray helper under a new name; keep only the current one.
+function removeOldTrays(current) {
+	try {
+		for (const name of readdirSync(DATA_DIR)) {
+			if (/^tray-[a-z0-9]+\.exe$/.test(name) && join(DATA_DIR, name) !== current) {
+				try {
+					unlinkSync(join(DATA_DIR, name));
+				} catch {} // still running (an old tray): next start removes it
+			}
+		}
+	} catch {}
+}
 
 const ROUTES = {
 	"GET /": async () => HELP,
+	"GET /.well-known/agent-multi-tab-use": async () => HELP,
 	"GET /status": async () => {
 		const connected = !!ext || (await waitForExt(3000));
 		const base = connected ? await askExt("status") : { ports: [], groups: [] };
@@ -308,7 +406,8 @@ const ROUTES = {
 		};
 	},
 	"POST /claim": async (body) => {
-		await expireLeases();
+		// Tidying idle ports first frees them for this claim, but a slow or failed sweep must never block the claim.
+		await Promise.race([expireLeases().catch((err) => log("lease expiry before claim failed", { error: String(err) })), Bun.sleep(3000)]);
 		const busy = [...relays].filter(([, relay]) => relay.bridge.connections > 0).map(([port]) => port);
 		const result = await askExt("claim", { ...body, avoid: await scanForeign(), busy });
 		const list = result.claimed ?? [result];
@@ -334,6 +433,12 @@ const ROUTES = {
 		return { adopted: String(targetId), port: lane.port, group: lane.group ?? `Port ${lane.port}` };
 	},
 	"POST /group": (body) => askExt("group", body),
+	"GET /groups": () => askExt("groups"),
+	"POST /groups/cleanup": async (body) => {
+		const result = await askExt("cleanupGroups", body);
+		for (const port of result.releasedPorts ?? []) relays.get(port)?.bridge.releaseLaneClaims();
+		return result;
+	},
 	"POST /group/delete": (body) => askExt("deleteGroup", body),
 	"POST /ports": async (body) => {
 		const result = await askExt("addPorts", { ...body, avoid: await scanForeign() });
@@ -365,6 +470,7 @@ try {
 			// Web pages send their own Origin; local agents send none or this app's own address.
 			// The connected extension's own pages (its dashboard) may call the API too.
 			if (!isLocalOrigin(origin, HUB_PORT) && !(ext && origin === ext.data.origin)) return Response.json({ error: "Forbidden: web pages can't use this API." }, { status: 403 });
+			if (req.method === "GET" && url.pathname === "/agent-guide") return new Response(AGENT_GUIDE, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
 			const route = ROUTES[`${req.method} ${url.pathname.replace(/\/+$/, "") || "/"}`];
 			if (!route) return Response.json({ error: "not found", help: HELP }, { status: 404 });
 			try {
@@ -413,6 +519,10 @@ try {
 					if (socket) relays.get(msg.port)?.bridge.extMessage(socket, msg.msg);
 					return;
 				}
+				if (msg.t === "log") {
+					log(`extension: ${String(msg.message).slice(0, 200)}`, msg.data);
+					return;
+				}
 				if (msg.t === "ports") {
 					if (typeof msg.extVersion === "string") extVersion = msg.extVersion;
 					maybeReloadExtension();
@@ -445,5 +555,6 @@ try {
 }
 
 registerAutostart();
+writeDiscovery();
 setInterval(() => ext && expireLeases().catch((err) => log("lease expiry failed", { error: String(err) })), EXPIRY_CHECK_MS);
 log(`Agent Multi Tab Use ${VERSION} started`, { hub: HUB, pid: process.pid });

@@ -99,6 +99,12 @@ class TabState {
 	banned = false;
 	/** Chrome's message from the last failed attach, passed on to the agent. */
 	attachError = "";
+	/** CDP setup commands (X.enable, setAutoAttach, ...) an agent sent on the root session, replayed after a reattach. */
+	readonly setup = new Map<string, unknown>();
+	/** Times Chrome dropped the debugger in the last 10s; a reattach loop stops after 10. */
+	drops: number[] = [];
+	/** In-flight reattach after Chrome dropped the debugger; commands wait for it. */
+	reattaching: Promise<void> | null = null;
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
@@ -156,7 +162,13 @@ const SLOW_RPC_TIMEOUT_MS = Number(process.env.AMTU_SLOW_RPC_MS || 120_000);
 /** How long a command waits for the extension to (re)connect before failing; a service-worker restart takes ~1s. */
 const EXT_WAIT_MS = Number(process.env.AMTU_EXT_WAIT_MS || 10_000);
 /** Attach errors that won't go away by retrying (the page itself can't be debugged). */
-const PERMANENT_ATTACH_ERROR = /Cannot access|Cannot attach to this target/i;
+// A foreign extension's frame (password manager, coupon finder) blocks the debugger only while it is in the page.
+const PERMANENT_ATTACH_ERROR = /Cannot access(?! a chrome-extension:\/\/ URL of different extension)|Cannot attach to this target/i;
+const FOREIGN_EXTENSION_FRAME = /URL of different extension/i;
+/** Root-session commands that set up a debugging session; replayed on the new session after Chrome drops one. */
+const SETUP_METHOD = /\.enable$|^Target\.setAutoAttach$|^Page\.setLifecycleEventsEnabled$|^Network\.setExtraHTTPHeaders$|^Emulation\.set/;
+/** Setup commands that stack (each call adds one), kept per distinct params. */
+const SETUP_MANY = /^Page\.addScriptToEvaluateOnNewDocument$|^Runtime\.addBinding$|^Page\.createIsolatedWorld$/;
 const CDP_ERROR_METHOD_NOT_FOUND = -32601;
 const CDP_ERROR_SERVER = -32000;
 
@@ -522,6 +534,7 @@ export class RelayBridge {
 			return;
 		}
 		const tab = this.#tabs.get(tabId);
+		if (tab?.reattaching) await tab.reattaching;
 		if (tab && !(await this.#ensureAttached(tab))) {
 			this.#replyError(conn, msg, this.#attachFailure(tab));
 			return;
@@ -537,6 +550,11 @@ export class RelayBridge {
 				},
 				SLOW_CDP_METHODS.has(msg.method) ? SLOW_RPC_TIMEOUT_MS : RPC_TIMEOUT_MS,
 			);
+			if (tab && !realSessionId) {
+				if (SETUP_METHOD.test(msg.method)) tab.setup.set(msg.method, msg.params);
+				else if (SETUP_MANY.test(msg.method)) tab.setup.set(`${msg.method} ${JSON.stringify(msg.params ?? {})}`, msg.params);
+				else if (msg.method.endsWith(".disable")) tab.setup.delete(msg.method.replace(/disable$/, "enable"));
+			}
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
@@ -843,8 +861,46 @@ export class RelayBridge {
 		tab.attaching = null;
 		// Only the user dismissing the debugging bar means hands off; anything else may attach again.
 		if (reason === "canceled_by_user") tab.banned = true;
+		// Chrome drops the debugger when another extension's frame lands in the page or the
+		// renderer swaps; while an agent still holds a session, reattach and replay its setup
+		// instead of failing every later command. More than 10 drops in 10s: give up.
+		if (reason === "target_closed" && this.#sessionHolders(tabId).length > 0) {
+			const now = Date.now();
+			tab.drops = tab.drops.filter(t => now - t < 10_000).concat(now);
+			if (tab.reattaching) return;
+			if (tab.drops.length <= 10) {
+				tab.reattaching = this.#reattach(tab).finally(() => {
+					tab.reattaching = null;
+				});
+				return;
+			}
+		}
 		// The user dismissed the debugger infobar (or the attach was torn
 		// down): release the tab's omp-group membership too.
+		this.#syncTabGrouping(tab);
+		this.#retractTab(tab);
+	}
+
+	async #reattach(tab: TabState): Promise<void> {
+		while (tab.drops.length <= 10) {
+			for (const child of tab.realSessions) {
+				this.#realSessionTabs.delete(child);
+				this.#onCdpEvent(tab.tabId, undefined, "Target.detachedFromTarget", { sessionId: child });
+			}
+			tab.realSessions.clear();
+			if (!this.#tabs.has(tab.tabId) || !(await this.#ensureAttached(tab))) break;
+			if (tab.setup.has("Runtime.enable")) this.#onCdpEvent(tab.tabId, undefined, "Runtime.executionContextsCleared", {});
+			for (const [key, params] of tab.setup) {
+				const method = key.split(" ")[0];
+				await this.#rpc({ op: "send", tabId: tab.tabId, method, params }).catch(() => {});
+			}
+			if (tab.attached) {
+				this.#log("tab reattached", { tabId: tab.tabId, replayed: tab.setup.size, drops: tab.drops.length });
+				return;
+			}
+			await new Promise(resolve => setTimeout(resolve, 200));
+		}
+		this.#log("reattach gave up", { tabId: tab.tabId, drops: tab.drops.length });
 		this.#syncTabGrouping(tab);
 		this.#retractTab(tab);
 	}
@@ -1075,7 +1131,10 @@ export class RelayBridge {
 
 	#attachFailure(tab: TabState): string {
 		const why = tab.banned && !tab.attachError ? "the user closed the debugging bar on it" : tab.attachError || "unknown error";
-		return `Cannot attach to tab ${tab.tabId} (${tab.url}): ${why}`;
+		const hint = FOREIGN_EXTENSION_FRAME.test(why)
+			? " (another Chrome extension has a frame in this page; Chrome blocks debugging until it is gone. Retry, or ask the user to set that extension's site access to 'On click')"
+			: "";
+		return `Cannot attach to tab ${tab.tabId} (${tab.url}): ${why}${hint}`;
 	}
 
 	#eligible(tab: TabState): boolean {

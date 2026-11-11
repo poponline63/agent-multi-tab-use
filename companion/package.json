@@ -1,11 +1,11 @@
 ﻿{
 	"name": "agent-multi-tab-use-companion",
-	"version": "1.6.8",
+	"version": "1.7.0",
 	"private": true,
 	"license": "MIT",
 	"scripts": {
 		"start": "bun main.js",
-		"test": "bun selftest.js",
+		"test": "bun selftest.js && bun ../extension/test/extension.test.js",
 		"build": "bun build.js"
 	}
 }

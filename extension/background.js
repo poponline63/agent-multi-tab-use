@@ -16,7 +16,10 @@
 // Groups: each port's lease names the Chrome tab group its tabs go in; ports
 // leased under the same name share one group.
 var MAX_PORTS = 250;
-var DEFAULT_PORTS = Array.from({ length: 10 }, (_, i) => 9224 + i);
+// Never handed out: Chrome's usual remote-debugging ports (the user's own Chrome may
+// listen on one) and Node's inspector. Mirrors RESERVED_PORTS in the companion app.
+var RESERVED_PORTS = [9222, 9226, 9229];
+var DEFAULT_PORTS = Array.from({ length: 13 }, (_, i) => 9224 + i).filter((p) => !RESERVED_PORTS.includes(p)).slice(0, 10);
 var COLORS = ["blue", "red", "yellow", "green", "pink", "purple", "cyan", "orange", "grey"];
 var lanes = new Map();
 var owners = new Map();
@@ -26,15 +29,18 @@ var claims = new Map();
 var createdTabs = new Map();
 // Tabs an agent opened that the user has since looked at: release hands these back instead of closing them.
 var seenTabs = new Set();
-var settings = { ports: [], leases: {}, groupColors: {}, shareTabs: false };
+var settings = { ports: [], leases: {}, groupColors: {}, shareTabs: true };
 
 function validPort(port) {
-  return Number.isInteger(port) && port > 0 && port <= 65535;
+  return Number.isInteger(port) && port > 0 && port <= 65535 && !RESERVED_PORTS.includes(port);
 }
 async function loadSettings() {
-  const stored = await chrome.storage.local.get({ ports: DEFAULT_PORTS, leases: {}, groupColors: {}, shareTabs: false, groups: null });
+  // shareTabs is on unless the user turned it off.
+  const stored = await chrome.storage.local.get({ ports: DEFAULT_PORTS, leases: {}, groupColors: {}, shareTabs: true, groups: null });
   const ports = [...new Set((Array.isArray(stored.ports) ? stored.ports : DEFAULT_PORTS).map(Number).filter(validPort))].slice(0, MAX_PORTS);
-  let leases = stored.leases && typeof stored.leases === "object" ? stored.leases : {};
+  let leases = stored.leases && typeof stored.leases === "object" ? { ...stored.leases } : {};
+  for (const port of RESERVED_PORTS)
+    delete leases[port];
   const groupColors = stored.groupColors && typeof stored.groupColors === "object" ? { ...stored.groupColors } : {};
   // Up to 1.5, named groups owned their ports and leases were bare agent names.
   if (Array.isArray(stored.groups)) {
@@ -49,7 +55,7 @@ async function loadSettings() {
     await chrome.storage.local.set({ leases, groupColors });
     await chrome.storage.local.remove(["groups", "closeTabsOnRelease"]);
   }
-  return { ports, leases, groupColors, shareTabs: stored.shareTabs === true };
+  return { ports, leases, groupColors, shareTabs: stored.shareTabs !== false };
 }
 var tabStateSaving = null;
 function saveTabState() {
@@ -80,8 +86,10 @@ function laneLook(port) {
     const named = Object.keys(settings.groupColors).find((name) => name.toLowerCase() === title.toLowerCase());
     return { title, color: settings.groupColors[named] ?? "grey" };
   }
-  const index = Math.max(0, settings.ports.indexOf(port));
-  return { title: `Port ${port}`, color: COLORS[index % COLORS.length] };
+  // A port nobody claimed (an agent dialed the number directly): its tabs share the one
+  // "Agents" group instead of a "Port <n>" group per port.
+  const named = Object.keys(settings.groupColors).find((name) => name.toLowerCase() === "agents");
+  return { title: "Agents", color: settings.groupColors[named] ?? "grey" };
 }
 function snapshot(tab) {
   if (tab.id === undefined)
@@ -207,13 +215,45 @@ async function groupTabs(tabIds, title, color) {
   }
   const grouped = {};
   for (const [windowId, ids] of byWindow) {
-    const existing = await chrome.tabGroups.query({ title, windowId });
+    const existing = await groupsTitled(title, windowId);
     const groupId = existing[0] ? await chrome.tabs.group({ tabIds: ids, groupId: existing[0].id }) : await chrome.tabs.group({ tabIds: ids });
     await chrome.tabGroups.update(groupId, { title, color });
+    await mergeInto(groupId, existing.slice(1));
     for (const id of ids)
       grouped[String(id)] = groupId;
   }
   return { grouped };
+}
+// Groups with exactly this title in a window, oldest (lowest id) first. tabGroups.query's
+// title is a pattern, so compare exactly here.
+async function groupsTitled(title, windowId) {
+  const all = await chrome.tabGroups.query({ windowId }).catch(() => []);
+  return all.filter((g) => g.title === title).sort((a, b) => a.id - b.id);
+}
+// Folds duplicate groups (same title, same window) into one: one group per agent.
+async function mergeInto(groupId, duplicates) {
+  for (const dup of duplicates) {
+    if (dup.id === groupId)
+      continue;
+    const tabs = await chrome.tabs.query({ groupId: dup.id }).catch(() => []);
+    const ids = tabs.map((t) => t.id).filter((id) => id !== undefined);
+    if (ids.length)
+      await chrome.tabs.group({ tabIds: ids, groupId }).catch(() => {});
+  }
+}
+async function dedupeGroups() {
+  const all = await chrome.tabGroups.query({}).catch(() => []);
+  const byKey = new Map();
+  for (const g of all.sort((a, b) => a.id - b.id)) {
+    if (!g.title)
+      continue;
+    const key = `${g.windowId}\u0000${g.title}`;
+    byKey.set(key, [...byKey.get(key) ?? [], g]);
+  }
+  for (const list of byKey.values()) {
+    if (list.length > 1)
+      await mergeInto(list[0].id, list.slice(1));
+  }
 }
 // Renaming/recoloring updates the Chrome group in place. Moving tabs to a new
 // group would change their groupId, which the relay reads as the user dragging
@@ -230,6 +270,8 @@ async function restyleGroups() {
     for (const groupId of groupIds)
       await chrome.tabGroups.update(groupId, look).catch(() => {});
   }
+  // A rename can leave two groups with one title (a port's lease changed hands): fold them.
+  await dedupeGroups();
 }
 async function buildHello(lane) {
   const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
@@ -261,6 +303,62 @@ async function wake(tabId) {
   for (let i = 0; i < 50 && (await chrome.tabs.get(tabId)).status !== "complete"; i++)
     await new Promise((resolve) => setTimeout(resolve, 200));
 }
+// Chrome refuses (and drops) a debugger on any page holding another extension's frame:
+// Bitwarden's autofill menu, coupon finders. In agent tabs only, mark form fields with the
+// password managers' "skip this field" attributes so their menus never open (Bitwarden
+// honors data-bwignore once "Allow websites to exclude fields to autofill" is on), and
+// remove any such frame that still gets inserted. The user's tabs are untouched.
+// ponytail: re-injected per navigation, so a frame an extension adds at document_start
+// can win the race; and a shadow root attached after its host is in the page is missed.
+// Removing a frame races Chrome's own check, so the relay reattaches after a drop anyway.
+function guardForeignFrames(tabId, frameId) {
+  return chrome.scripting.executeScript({
+    target: frameId === undefined ? { tabId, allFrames: true } : { tabId, frameIds: [frameId] },
+    injectImmediately: true,
+    args: [`chrome-extension://${chrome.runtime.id}/`],
+    func: (own) => {
+      if (globalThis.__amtuFrameGuard)
+        return;
+      globalThis.__amtuFrameGuard = true;
+      const seen = new WeakSet();
+      const foreign = (el) => {
+        const url = el.src || el.data || "";
+        return /^(IFRAME|FRAME|EMBED|OBJECT)$/.test(el.tagName) && url.startsWith("chrome-extension://") && !url.startsWith(own);
+      };
+      const check = (node) => {
+        if (node.nodeType !== 1)
+          return;
+        for (const el of [node, ...node.querySelectorAll("*")]) {
+          if (foreign(el)) {
+            el.remove();
+            continue;
+          }
+          if (/^(INPUT|TEXTAREA|SELECT|FORM)$/.test(el.tagName)) {
+            el.setAttribute("data-bwignore", "");
+            el.setAttribute("data-lpignore", "true");
+            el.setAttribute("data-1p-ignore", "");
+          }
+          const root = chrome.dom.openOrClosedShadowRoot(el);
+          if (root && !seen.has(root)) {
+            seen.add(root);
+            watch(root);
+            [...root.children].forEach(check);
+          }
+        }
+      };
+      const watch = (root) => new MutationObserver((records) => {
+        for (const r of records)
+          r.type === "attributes" ? check(r.target) : r.addedNodes.forEach(check);
+      }).observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["src", "data"] });
+      watch(document);
+      check(document.documentElement);
+    }
+  }).catch(() => {});
+}
+chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+  if (claims.has(tabId))
+    void guardForeignFrames(tabId, frameId);
+});
 async function attachFor(lane, tabId) {
   const set = owners.get(tabId);
   if (set?.size) {
@@ -268,8 +366,16 @@ async function attachFor(lane, tabId) {
     return;
   }
   await wake(tabId);
+  await guardForeignFrames(tabId);
+  // A frame the guard just removed can take a moment to be torn down: retry once.
+  const attach = () => chrome.debugger.attach({ tabId }, "1.3").catch(async (err) => {
+    if (!String(err?.message ?? err).includes("different extension"))
+      throw err;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return chrome.debugger.attach({ tabId }, "1.3");
+  });
   try {
-    await chrome.debugger.attach({ tabId }, "1.3");
+    await attach();
   } catch (err) {
     // ponytail: after a service-worker restart owners is empty but Chrome may still
     // hold our attachment; adopt it. Ceiling: also adopts a DevTools/other-extension
@@ -321,7 +427,7 @@ async function runRpc(lane, msg) {
       }
     }
     case "removeTab":
-      await chrome.tabs.remove(msg.tabId);
+      await withTimeout(chrome.tabs.remove(msg.tabId), 5000, "closing the tab");
       return {};
     case "activateTab":
       // ponytail: agents never switch the user's active tab or window focus. If a
@@ -406,7 +512,7 @@ async function applySettings() {
       lanes.set(port, { port, open: false });
   }
   refreshStatus();
-  restyleGroups();
+  enqueueGroupOp(restyleGroups).catch(() => {});
   pushPortsToHub();
 }
 importScripts("hub-client.js");

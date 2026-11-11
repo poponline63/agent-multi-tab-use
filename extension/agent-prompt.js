@@ -19,7 +19,8 @@ STEP 1: CLAIM YOUR PORT
   Python:     json.load(urllib.request.urlopen(urllib.request.Request("${HUB}/claim", b"${pyBody}", {"Content-Type": "application/json"})))
   Reply:      {"port": 9236, "cdpUrl": "http://127.0.0.1:9236", "group": "...", "ready": true}
   - Replace "your-name" with a short fixed name for yourself (e.g. "hermes", "codex-research"). Claiming again
-    with the same name returns the same port, so retries are safe.
+    with the same name returns the same port and the same tab group, so retries are safe. Never make up a new
+    name per run and never dial a port number (9222-9240) directly: always claim.
   - "group" is the name of your Chrome tab group; agents that claim the same group share it.
   - Need several ports (one per sub-agent)? Add "count": 5. Missing ports are created automatically.
   - 503 with "retry": true means Chrome is reconnecting. Wait 5 seconds and retry, for up to a minute.
@@ -44,7 +45,7 @@ STEP 3: WHEN YOU'RE DONE (always, even after a quick lookup)
   release your ports: POST ${HUB}/release  {"agent":"your-name","all":true}
   Release tidies up for you: tabs you opened close, except ones the user has looked at, which stay open for
   them. If the user wants your tabs kept, add "keepTabs": true; to close even ones they looked at, "closeTabs": true.
-  Forgot to release? After 60 minutes without use your port is released the same way.
+  Forgot to release? After 15 minutes without use your port is released the same way.
 
 WHAT YOU CAN SEE
   ${seeLine}
@@ -53,6 +54,15 @@ WHAT YOU CAN SEE
   Your tabs open in the background so the user can keep working. You can't switch the user's active tab
   (bringToFront / activateTarget do nothing). If a page acts differently when unfocused, send
   Emulation.setFocusEmulationEnabled {"enabled": true} on your tab (Puppeteer and Playwright already do).
+
+CAPTCHAS AND OTHER EXTENSIONS
+  The user's own extensions keep running in your tabs. If a page shows a captcha (reCAPTCHA, hCaptcha,
+  Cloudflare Turnstile, "Just a moment..."), don't click or solve it: a captcha-solver extension (or the user)
+  handles it. Every 2 seconds, for up to 2 minutes, check whether one of these fields has a value:
+    [name="g-recaptcha-response"], [name="h-captcha-response"], [name="cf-turnstile-response"]
+  or the challenge is gone (a solved Cloudflare check reloads the page). Then carry on. Still unsolved: tell the user.
+  Password-manager and coupon pop-up menus are kept out of your tabs. If one command fails with
+  "Detached while handling command", send it again: the hub reconnects your session by itself.
 
 OTHER ENDPOINTS (GET ${HUB}/ lists them all)
   GET  /status   every port: its group, which agent holds it, "live", tab count; plus "chromeConnected"
