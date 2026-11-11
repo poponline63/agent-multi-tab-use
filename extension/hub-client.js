@@ -333,7 +333,7 @@ function isAgentGroupTitle(title) {
 // chip in the tab strip / bookmarks bar for good, and extensions can't delete those.
 // Ungrouping first lets the group empty out and disappear instead, so agents leave no chips.
 async function ungroupThenClose(id) {
-  await withTimeout(chrome.tabs.ungroup(id), 3000, "ungrouping a tab").catch(() => {});
+  await withTimeout(Promise.resolve().then(() => chrome.tabs.ungroup(id)), 3000, "ungrouping a tab").catch(() => {});
   await withTimeout(chrome.tabs.remove(id), 5000, "closing a tab");
 }
 function closeTab(id) {
