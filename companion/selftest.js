@@ -52,7 +52,7 @@ Object.assign(globalThis, {
 	loadSettings: async () => ({ ports: [...store.ports], leases: structuredClone(store.leases), groupColors: structuredClone(store.groupColors), shareTabs: store.shareTabs === true }),
 	chrome: {
 		runtime: { getManifest: () => ({ version: "0.0.1-test" }), reload: () => {} },
-		tabs: { remove: async (id) => void removedTabs.push(id) },
+		tabs: { remove: async (id) => void removedTabs.push(id), ungroup: async () => {} },
 		storage: {
 			local: { get: async (d) => ({ ...d, ...Object.fromEntries(Object.keys(d).filter((k) => k in store).map((k) => [k, structuredClone(store[k])])) }), set: async (p) => Object.assign(store, structuredClone(p)) },
 			session: { get: async () => ({ laneStatus: [] }), set: async () => {} },
@@ -68,7 +68,7 @@ globalThis.WebSocket = class extends RealWS {
 
 // Stands in for another app (e.g. an agent's private Chrome) on a port we'd otherwise hand out.
 const other = LEASE ? null : Bun.serve({ hostname: "127.0.0.1", port: FOREIGN, fetch: () => new Response("not a relay", { status: 404 }) });
-const hub = Bun.spawn(["bun", join(import.meta.dir, "main.js")], {
+const hub = Bun.spawn([process.execPath, join(import.meta.dir, "main.js")], {
 	env: {
 		...process.env,
 		AMTU_HUB_PORT: String(TEST_HUB),
@@ -281,7 +281,7 @@ try {
 	await api("/release", { port: held, agent: "holder" });
 
 	// ---- idle leases go back to the pool (separate hub with a short idle time) ----
-	const lease = Bun.spawnSync(["bun", import.meta.path, "--lease"], { stdout: "inherit", stderr: "inherit" });
+	const lease = Bun.spawnSync([process.execPath, import.meta.path, "--lease"], { stdout: "inherit", stderr: "inherit" });
 	assert(lease.exitCode === 0, "idle lease expiry check passed");
 	console.log("\nall hub checks passed");
 } catch (err) {

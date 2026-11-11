@@ -106,8 +106,24 @@ try {
 	assert(fake.tabs.has(usersTab) && fake.tabs.get(usersTab).groupId === -1, "a tab the user opened in an agent-named group is only ungrouped");
 	assert(fake.tabs.get(personal).groupId >= 0 && [...fake.groups.values()].map((g) => g.title).join() === "Taxes" || [...fake.groups.values()].every((g) => g.title === "Taxes" || g.title === "Hermes"), "the user's own groups are untouched");
 	assert(res.groupsBefore === before && res.groupsAfter <= 2, `groups before ${res.groupsBefore}, after ${res.groupsAfter}`);
+	assert(fake.saved.length === 0, `cleanup leaves no saved-group chips behind (saved: ${fake.saved.join(", ") || "none"})`);
 	const extra = await hubOps.cleanupGroups({ titles: ["Taxes"], dryRun: true });
 	assert(extra.removed.some((r) => r.title === "Taxes"), "extra titles can be named explicitly");
+	// Releasing an agent closes its tabs without leaving a saved-group chip.
+	fake = await boot({ leases: { 9250: { agent: "temp", group: "Temp", since: 1 } }, groupColors: { Temp: "green" }, ports: [9250] });
+	lanes.set(9250, { port: 9250, open: true });
+	const r1 = await chrome.tabs.create({ url: "https://r1.example" });
+	const r2 = await chrome.tabs.create({ url: "https://r2.example" });
+	for (const t of [r1, r2]) createdTabs.set(t.id, 9250), claims.set(t.id, 9250);
+	await groupTabs([r1.id, r2.id], "Temp", "green");
+	const rel = await hubOps.release({ agent: "temp", all: true });
+	assert(rel.closedTabs === 2 && fake.groups.size === 0 && fake.saved.length === 0, `release closes the agent's tabs and its group with no saved chip (saved: ${fake.saved.join(", ") || "none"})`);
+	// An agent closing its own last tab (Target.closeTarget) leaves no chip either.
+	const r3 = await chrome.tabs.create({ url: "https://r3.example" });
+	claims.set(r3.id, 9250);
+	await groupTabs([r3.id], "Temp", "green");
+	await runRpc(lanes.get(9250), { op: "removeTab", tabId: r3.id });
+	assert(fake.saved.length === 0 && !fake.tabs.has(r3.id), "an agent closing its last tab leaves no saved-group chip");
 	// A group an agent holds a lease on right now is left alone.
 	fake = await boot({ leases: { 9240: { agent: "live", group: "Live", since: Date.now() } }, groupColors: { Live: "red" }, ports: [9240] });
 	const live = await chrome.tabs.create({ url: "https://live.example" });

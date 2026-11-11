@@ -8,8 +8,15 @@ export function makeFakeChrome({ local = {} } = {}) {
 	let nextGroupId = 100;
 	const listeners = () => ({ fns: [], addListener(fn) { this.fns.push(fn); } });
 	const hang = new Set(); // tab ids whose close never finishes (a "Leave site?" prompt)
-	const prune = () => {
-		for (const id of [...groups.keys()]) if (![...tabs.values()].some((t) => t.groupId === id)) groups.delete(id);
+	// Like Chrome 126+: a group whose last tab is closed is kept as a saved group (a chip
+	// the user must delete by hand); a group emptied by ungrouping just goes away.
+	const saved = [];
+	const prune = (closing = false) => {
+		for (const [id, g] of [...groups]) {
+			if ([...tabs.values()].some((t) => t.groupId === id)) continue;
+			if (closing && g.title) saved.push(g.title);
+			groups.delete(id);
+		}
 	};
 	const storageArea = (area) => ({
 		get: async (keys) => {
@@ -45,7 +52,7 @@ export function makeFakeChrome({ local = {} } = {}) {
 			remove: (id) => {
 				if (hang.has(id)) return new Promise(() => {});
 				for (const i of [id].flat()) tabs.delete(i);
-				prune();
+				prune(true);
 				return Promise.resolve();
 			},
 			group: async ({ tabIds, groupId, createProperties }) => {
@@ -72,5 +79,5 @@ export function makeFakeChrome({ local = {} } = {}) {
 			get: async (id) => ({ ...groups.get(id) }),
 		},
 	};
-	return { chrome, store, tabs, groups, hang };
+	return { chrome, store, tabs, groups, hang, saved };
 }

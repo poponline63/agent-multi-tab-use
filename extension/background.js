@@ -427,7 +427,7 @@ async function runRpc(lane, msg) {
       }
     }
     case "removeTab":
-      await withTimeout(chrome.tabs.remove(msg.tabId), 5000, "closing the tab");
+      await ungroupThenClose(msg.tabId);
       return {};
     case "activateTab":
       // ponytail: agents never switch the user's active tab or window focus. If a
