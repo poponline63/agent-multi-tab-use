@@ -77,6 +77,11 @@ const hub = Bun.spawn(["bun", join(import.meta.dir, "main.js")], {
 		AMTU_NO_AUTOSTART: "1",
 		AMTU_EXT_WAIT_MS: "1500",
 		AMTU_LEASE_IDLE_MS: LEASE ? "800" : "3600000",
+		AMTU_UNLEASED_IDLE_MS: LEASE ? "800" : "3600000",
+		AMTU_EXPIRY_CHECK_MS: LEASE ? "300" : "3600000",
+		// Windows takes ~2s to refuse a closed localhost port, longer than the probe waits.
+		// A 1 ms probe reproduces that here: every probe of a free port times out.
+		AMTU_PROBE_MS: "1",
 	},
 	stdout: "ignore",
 	stderr: "inherit",
@@ -111,6 +116,12 @@ if (LEASE) {
 		await Bun.sleep(1200);
 		const third = await api("/claim", { agent: "third" });
 		assert(removedTabs.includes(700) && third.port === first.port, `idle tabs on a port nobody leases are tidied, and the port is free again (got ${third.port})`);
+		// The agent's session ends (no more commands): its tabs close by themselves, no claim needed.
+		claims.set(701, third.port);
+		createdTabs.set(701, third.port);
+		await Bun.sleep(2000);
+		const after = await api("/status");
+		assert(removedTabs.includes(701) && !after.ports.some((p) => p.agent === "third"), "an idle agent's lease ends and its tabs close on the timer, without another claim");
 	} catch (err) {
 		console.error(err.message);
 		process.exitCode = 1;
@@ -140,6 +151,11 @@ try {
 	const got = d.claimed.map((x) => x.port);
 	assert(got.join() === "9727,9728,9730,9731", `count:4 adds ports when the pool is empty, skipping ${FOREIGN} (another app): ${got}`);
 	assert(!store.ports.includes(FOREIGN), "the other app's port was never added");
+	const scanned = (await api("/status")).usedByOtherApps;
+	assert(scanned.includes(FOREIGN) && !scanned.some((p) => p >= 9724 && p <= 9740 && p !== FOREIGN), `slow-to-refuse free ports are not mistaken for other apps' ports (other apps: ${scanned.filter((p) => p >= 9724 && p < 9760)})`);
+	const reserved = await api("/claim", { agent: "chrome-debugger", port: 9226 });
+	assert(/can't be used/.test(reserved.error ?? ""), "port 9226 (the user's Chrome debug port) is never handed out");
+	assert((await fetch(`http://127.0.0.1:${TEST_HUB}/agent-guide`).then((r) => r.text())).includes("/claim"), "GET /agent-guide serves plain-text agent instructions");
 	const again = await api("/claim", { agent: "hermes", group: "Hermes" });
 	assert(again.port === 9724, "an agent that claims again gets its same port back");
 	const again4 = await api("/claim", { agent: "claude", group: "Claude", count: 4 });

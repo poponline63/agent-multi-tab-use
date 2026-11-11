@@ -18,7 +18,7 @@ Browser automation normally means launching a separate, logged-out Chrome, or po
 - **One port per agent.** An agent claims a port and gets a CDP URL (`http://127.0.0.1:9236`).
 - **One tab group per agent.** Its tabs land in a named, colored Chrome tab group ("Hermes", "Claude", ...), with optional sub groups ("Hermes › Research").
 - **Agents can't see each other's tabs.** Tabs are owned by the port that opened them.
-- **Private by default.** Agents only see tabs they opened, never your email or bank. You can switch sharing on.
+- **Agents can use your tabs.** "Let agents see my own tabs" is on by default; switch it off and agents only see tabs they opened. Agents never see each other's tabs.
 - **Never steals focus.** Agent tabs open in the background and can't be brought to the front.
 - **Agents self-serve.** They claim ports, create groups, and add ports through a small local API. Anything that reduces your control (sharing your tabs, pulling ports from another agent's group) needs your confirmation first.
 
@@ -46,7 +46,7 @@ To stop the app: **Quit** in the tray menu, or `AgentMultiTabUse.exe --quit`.
 - **An agent gets an error**: the message says why (Chrome's own reason for a tab it can't debug, or that Chrome isn't connected). Agents ride out short gaps on their own: commands wait up to 10 seconds while the extension or app reconnects, and agents keep their tabs across restarts.
 - **Anything else**: right-click the tray icon, **Open log** (`%LOCALAPPDATA%\Agent Multi Tab Use\hub.log`).
 
-Ports are one shared pool: a released port goes to the next agent, and spare ones are removed again, so the list doesn't keep growing. An agent that forgets to release is released after 60 idle minutes, and its leftover tabs are tidied the same way (tabs you've looked at stay open). Popups and links an agent's page opens join that agent's tab group.
+Ports are one shared pool: a released port goes to the next agent, and spare ones are removed again, so the list doesn't keep growing. An agent that forgets to release is released after 15 idle minutes (ports nobody claimed: 5), and its leftover tabs are tidied the same way (tabs you've looked at stay open). Popups and links an agent's page opens join that agent's tab group.
 
 ## Give an agent access
 
@@ -102,7 +102,14 @@ curl -s -X POST http://127.0.0.1:9223/release -H "Content-Type: application/json
 | `POST /group/delete` | Forget a group's color |
 | `POST /ports` | Add ports (up to 250) |
 | `POST /adopt` | Take over a tab the user opened (only while sharing is on) |
-| `POST /settings` | `shareTabs` (turning it on needs **user confirmation**) |
+| `POST /settings` | `shareTabs` (on by default; turning it back on needs **user confirmation**) |
+| `GET /groups` | Every Chrome tab group, with which tabs agents opened |
+| `POST /groups/cleanup` | Remove leftover agent tab groups: unseen agent tabs close, every other tab is just ungrouped |
+| `GET /agent-guide` | Plain-text instructions for agents |
+
+### Finding the hub
+
+The app writes `%LOCALAPPDATA%\Agent Multi Tab Use\discovery.json` (hub URL, claim/release examples, MCP command) and `AGENTS.md` (the agent guide) on every start. Ports 9222, 9226 and 9229 are never used, so Chrome's own debugging port stays free (`AMTU_RESERVED_PORTS` changes the list).
 
 Each port also serves the standard DevTools endpoints: `GET /json/version`, `GET /json/list`, `PUT /json/new?<url>`, and `WS /cdp`.
 

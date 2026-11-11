@@ -381,7 +381,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 
 // The agent closed us: hand the port back so it doesn't sit leased for an hour.
-// A hard kill skips this; the hub's idle expiry (60 min) releases the port then.
+// A hard kill skips this; the hub's idle expiry (15 min) releases the port then.
 let exiting = false;
 async function shutdown() {
 	if (exiting) return;

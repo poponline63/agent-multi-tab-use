@@ -19,7 +19,8 @@ STEP 1: CLAIM YOUR PORT
   Python:     json.load(urllib.request.urlopen(urllib.request.Request("${HUB}/claim", b"${pyBody}", {"Content-Type": "application/json"})))
   Reply:      {"port": 9236, "cdpUrl": "http://127.0.0.1:9236", "group": "...", "ready": true}
   - Replace "your-name" with a short fixed name for yourself (e.g. "hermes", "codex-research"). Claiming again
-    with the same name returns the same port, so retries are safe.
+    with the same name returns the same port and the same tab group, so retries are safe. Never make up a new
+    name per run and never dial a port number (9222-9240) directly: always claim.
   - "group" is the name of your Chrome tab group; agents that claim the same group share it.
   - Need several ports (one per sub-agent)? Add "count": 5. Missing ports are created automatically.
   - 503 with "retry": true means Chrome is reconnecting. Wait 5 seconds and retry, for up to a minute.
@@ -44,7 +45,7 @@ STEP 3: WHEN YOU'RE DONE (always, even after a quick lookup)
   release your ports: POST ${HUB}/release  {"agent":"your-name","all":true}
   Release tidies up for you: tabs you opened close, except ones the user has looked at, which stay open for
   them. If the user wants your tabs kept, add "keepTabs": true; to close even ones they looked at, "closeTabs": true.
-  Forgot to release? After 60 minutes without use your port is released the same way.
+  Forgot to release? After 15 minutes without use your port is released the same way.
 
 WHAT YOU CAN SEE
   ${seeLine}
